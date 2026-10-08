@@ -1,0 +1,42 @@
+/*
+ * ESL Annual Clock theme — the single place to re-skin the app.
+ * Palette from the ESL Shipping brand guidelines: brand green #1AB24B is used
+ * only for small accents; teals for data/rings; dark neutrals for the header.
+ * Text/background pairs are chosen for WCAG 2.1 AA contrast.
+ */
+@theme {
+  --font-sans: var(--font-poppins), "Montserrat", "Open Sans", Arial, sans-serif;
+
+  --color-brand: #1ab24b;         /* accent bars, today marker */
+  --color-brand-dark: #138538;    /* headings */
+  --color-primary: #26645f;       /* buttons, links (7.0:1 on white) */
+  --color-primary-hover: #1d4e4a;
+  --color-primary-foreground: #ffffff;
+
+  --color-teal-1: #16a082;
+  --color-teal-2: #39978f;
+  --color-teal-3: #1cc0a7;
+  --color-teal-4: #55bfb6;
+  --color-teal-5: #a0d8d3;
+  --color-sage: #b0d9ab;
+
+  --color-ink: #212529;           /* body text */
+  --color-muted: #515b65;         /* secondary text (6.9:1 on white) */
+  --color-steel: #425b76;
+  --color-border: #d9e0e6;
+  --color-surface: #ffffff;
+  --color-canvas: #f8fafc;
+  --color-header: #12191d;        /* dark neutral, not brand-colored */
+  --color-header-foreground: #f8fafc;
+
+  --color-danger: #b42318;        /* overdue */
+  --color-danger-soft: #fdecea;
+  --color-warning: #9a6700;
+  --color-warning-soft: #fff4d6;
+  --color-success: #138538;
+  --color-success-soft: #e6f4ea;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
