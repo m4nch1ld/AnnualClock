@@ -34,8 +34,9 @@ export function angleToDate(angle: number, span: YearSpan): ISODate {
   return addDays(span.start, idx);
 }
 
+/** Rounded to 1/100 px so server- and browser-rendered SVG match exactly (hydration). */
 export function polar(cx: number, cy: number, r: number, angle: number): [number, number] {
-  return [cx + r * Math.sin(angle), cy - r * Math.cos(angle)];
+  return [Math.round((cx + r * Math.sin(angle)) * 100) / 100, Math.round((cy - r * Math.cos(angle)) * 100) / 100];
 }
 
 /** Convert an SVG point to (radius, angle) around the centre. */
