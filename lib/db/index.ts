@@ -16,6 +16,8 @@ export interface Tx {
 
 // Return DATE columns as 'YYYY-MM-DD' strings, never JS Dates (avoids TZ shifts).
 pg.types.setTypeParser(1082, (v: string) => v);
+// TIMESTAMPTZ as ISO-8601 strings (serialisable to client components unchanged).
+pg.types.setTypeParser(1184, (v: string) => new Date(v).toISOString());
 
 const globalForPool = globalThis as unknown as { __eslPool?: pg.Pool };
 

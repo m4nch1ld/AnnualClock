@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { buildOccurrences, type Occurrence } from "@/lib/domain";
@@ -14,6 +14,7 @@ import { AgendaView } from "./agenda-view";
 import { ActivityPanel, type PanelState } from "./activity-panel";
 import { statusColor } from "./colors";
 import type { WorkspaceData } from "./types";
+import { moveActivity } from "@/app/(app)/clocks/actions";
 import { cn } from "@/lib/utils";
 
 type View = "wheel" | "list" | "agenda";
@@ -34,6 +35,16 @@ export function ClockWorkspace({ data }: { data: WorkspaceData }) {
   const [zoomMonth, setZoomMonth] = useState<number | null>(null);
   const [agendaMonth, setAgendaMonth] = useState<number>(yearOf(today) === year ? monthOf(today) : 1);
   const [panel, setPanel] = useState<PanelState | null>(null);
+  const [toast, setToast] = useState<{ message: string; undo?: () => void; error?: boolean } | null>(null);
+  const [, startTransition] = useTransition();
+  // Optimistic date overrides for drag-moved one-off activities until the server data refreshes.
+  const [overrides, setOverrides] = useState<Record<string, { start_date: ISODate; end_date: ISODate | null }>>({});
+  useEffect(() => setOverrides({}), [data.activities]);
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), toast.undo ? 8000 : 4000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   // Phones default to the list view (unless a view was chosen explicitly).
   useEffect(() => {
@@ -63,8 +74,15 @@ export function ClockWorkspace({ data }: { data: WorkspaceData }) {
   const clocksById = useMemo(() => new Map(clocks.map((c) => [c.id, c])), [clocks]);
 
   const allOccurrences = useMemo(
-    () => buildOccurrences(data.activities, data.states, makeDate(year, 1, 1), makeDate(year, 12, 31), today),
-    [data.activities, data.states, year, today],
+    () =>
+      buildOccurrences(
+        data.activities.map((a) => (overrides[a.id] ? { ...a, ...overrides[a.id] } : a)),
+        data.states,
+        makeDate(year, 1, 1),
+        makeDate(year, 12, 31),
+        today,
+      ),
+    [data.activities, data.states, year, today, overrides],
   );
 
   const filtered = useMemo(() => {
@@ -134,9 +152,43 @@ export function ClockWorkspace({ data }: { data: WorkspaceData }) {
     (band: WheelBand, date: ISODate) => setPanel({ kind: "create", clockId: band.clockId, ringId: band.ringId, date }),
     [],
   );
-  const onDragCommit = useCallback((o: Occurrence, start: ISODate, end: ISODate | null) => {
-    setPanel({ kind: "move", occ: o, start, end });
-  }, []);
+  const onDragCommit = useCallback(
+    (o: Occurrence, start: ISODate, end: ISODate | null) => {
+      if (o.recurring) {
+        setPanel({ kind: "move", occ: o, start, end });
+        return;
+      }
+      // One-off: save immediately (optimistic) with undo.
+      const prev = { start_date: o.date, end_date: o.endDate };
+      const move = (to: { start_date: ISODate; end_date: ISODate | null }, from: ISODate) =>
+        moveActivity({ activity_id: o.activity.id, occurrence_date: from, new_start: to.start_date, new_end: to.end_date, scope: "all" });
+      setOverrides((m) => ({ ...m, [o.activity.id]: { start_date: start, end_date: end } }));
+      startTransition(async () => {
+        const r = await move({ start_date: start, end_date: end }, o.date);
+        if (!r.ok) {
+          setOverrides((m) => {
+            const n = { ...m };
+            delete n[o.activity.id];
+            return n;
+          });
+          setToast({ message: r.error, error: true });
+          return;
+        }
+        router.refresh();
+        setToast({
+          message: t("activity.moved", { title: o.activity.title }),
+          undo: () =>
+            startTransition(async () => {
+              setOverrides((m) => ({ ...m, [o.activity.id]: prev }));
+              await move(prev, start);
+              router.refresh();
+              setToast(null);
+            }),
+        });
+      });
+    },
+    [router],
+  );
 
   const filtersActive = hiddenRings.size > 0 || owner || status !== "all" || query;
   const title = mode === "overlay" ? t("nav.overview") : clocks[0]?.name ?? "";
@@ -358,13 +410,32 @@ export function ClockWorkspace({ data }: { data: WorkspaceData }) {
               personName={personName}
               onClose={() => setPanel(null)}
               onChange={setPanel}
-              onSaved={() => {
+              onSaved={(message) => {
                 setPanel(null);
                 router.refresh();
+                if (message) setToast({ message });
               }}
             />
           )}
         </div>
+      </div>
+      <div aria-live="polite" className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2">
+        {toast && (
+          <div
+            role="status"
+            className={cn(
+              "flex items-center gap-3 rounded-md px-4 py-2 text-sm shadow-lg",
+              toast.error ? "bg-danger text-white" : "bg-header text-header-foreground",
+            )}
+          >
+            {toast.message}
+            {toast.undo && (
+              <button type="button" onClick={toast.undo} className="font-medium text-brand underline">
+                {t("activity.undo")}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
