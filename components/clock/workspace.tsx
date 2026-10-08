@@ -190,6 +190,15 @@ export function ClockWorkspace({ data }: { data: WorkspaceData }) {
     [router],
   );
 
+  // Deep link from emails / in-app notifications: ?focus=<activityId>:<date>
+  useEffect(() => {
+    const focus = params.get("focus");
+    if (!focus) return;
+    const o = allOccurrences.find((x) => x.key === focus) ?? allOccurrences.find((x) => x.activity.id === focus.split(":")[0]);
+    if (o) setPanel({ kind: "view", occ: o });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const filtersActive = hiddenRings.size > 0 || owner || status !== "all" || query;
   const title = mode === "overlay" ? t("nav.overview") : clocks[0]?.name ?? "";
 

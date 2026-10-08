@@ -56,6 +56,7 @@ const MEMBERS: Array<[UserKey, string, "viewer" | "editor" | "admin"]> = [
   ["viewer", "environmental", "viewer"],
   ["gm", "general-management", "viewer"],
   ["super", "general-management", "admin"],
+  ["super", "safety", "admin"],
 ];
 
 interface SeedActivity {

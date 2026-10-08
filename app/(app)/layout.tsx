@@ -4,10 +4,14 @@ import { requireSession } from "@/lib/server/session";
 import { t } from "@/lib/i18n";
 import { NavLinks } from "@/components/nav-links";
 import { NotificationBell } from "@/components/notification-bell";
+import { withUser } from "@/lib/db";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const session = await requireSession();
   const { profile } = session;
+  const unread = await withUser(profile.id, (tx) =>
+    tx.one<{ n: number }>(`select count(*)::int as n from in_app_notifications where read_at is null`),
+  );
   const multiClock = session.memberships.length > 1 || session.isAllClocksViewer || session.isSuperAdmin;
 
   const links = [
@@ -32,7 +36,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             <NavLinks links={links} />
           </nav>
           <div className="ml-auto flex items-center gap-3">
-            <NotificationBell />
+            <NotificationBell unread={unread?.n ?? 0} />
             <span className="hidden text-xs text-white/70 md:inline" title={profile.email}>
               {profile.full_name ?? profile.email}
               {session.isSuperAdmin && ` · ${t("roles.super_admin")}`}
