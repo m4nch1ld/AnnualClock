@@ -26,7 +26,7 @@ import {
 } from "@/lib/wheel/geometry";
 import type { Occurrence } from "@/lib/domain";
 import { formatDateRange, monthName, t } from "@/lib/i18n";
-import { statusColor } from "./colors";
+import { StatusBadge } from "./status-badge";
 
 export interface WheelBand {
   id: string;
@@ -562,9 +562,7 @@ export function Wheel(props: WheelProps) {
             {t("clock.owner")}: {props.personName(hover.occ.activity.owner_id)}
           </div>
           <div className="mt-1 flex gap-2">
-            <span style={{ color: statusColor(hover.occ) ?? undefined }}>
-              {hover.occ.overdue ? t("activity.statuses.overdue") : t(`activity.statuses.${hover.occ.status}`)}
-            </span>
+            <StatusBadge occ={hover.occ} />
             {hover.occ.recurring && <span className="text-muted">↻ {t("clock.recurring")}</span>}
           </div>
         </div>

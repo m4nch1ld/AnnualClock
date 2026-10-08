@@ -65,7 +65,7 @@ export function AgendaView({ year, month, onMonthChange, today, occurrences, col
               const outside = d < first || d > last;
               return (
                 <div key={d} className={cn("min-h-24 border-l border-border p-1", outside && "bg-canvas/70")}>
-                  <div className={cn("mb-1 text-xs", d === today ? "inline-block rounded bg-brand px-1.5 font-medium text-white" : "text-muted")}>
+                  <div className={cn("mb-1 text-xs", d === today ? "inline-block rounded bg-brand px-1.5 font-medium text-header" : "text-muted")}>
                     {Number(d.slice(8))}
                   </div>
                   <ul className="space-y-0.5">

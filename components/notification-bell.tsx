@@ -46,7 +46,7 @@ export function NotificationBell({ unread }: { unread: number }) {
           <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
         </svg>
         {count > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-brand px-1 text-center text-[10px] font-semibold leading-4 text-white">
+          <span className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-brand px-1 text-center text-[10px] font-semibold leading-4 text-header">
             {count > 99 ? "99+" : count}
           </span>
         )}

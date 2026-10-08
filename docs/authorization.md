@@ -37,9 +37,9 @@ read nor write any row belonging to it.
 ### Email action links
 "Mark done" / "Snooze" links in emails carry an HMAC-signed, expiring token
 (`lib/tokens.ts`) naming the activity, occurrence and recipient. The server
-verifies the signature, then re-checks that the recipient is **still active and
-can edit the clock** (or is the owner/assignee) before writing. Viewers do not
-get these buttons.
+verifies the signature and expiry, checks the recipient is **still active**, and
+performs the write **through RLS as the recipient** — so it only succeeds if they can
+still edit the clock. Viewers do not get these buttons.
 
 ### Server-only data
 - `clock_secrets` (Teams webhook URLs), `rate_limits`: RLS enabled with **no
