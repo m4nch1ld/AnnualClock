@@ -17,7 +17,7 @@ const schema = z.object({
   /** If set, every outgoing email goes to this address instead (demo/staging safety net). */
   EMAIL_REDIRECT_TO: z.string().optional(),
   /** 'resend' (default when RESEND_API_KEY is set) or 'console' (log only). */
-  EMAIL_PROVIDER: z.enum(["resend", "console"]).optional(),
+  EMAIL_PROVIDER: z.enum(["resend", "smtp", "console"]).optional(),
   /** Enables the one-click demo user switcher on the login page. Never enable in production. */
   DEMO_LOGIN_ENABLED: z
     .string()

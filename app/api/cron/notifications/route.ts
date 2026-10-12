@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { runDefaultNotificationJob } from "@/lib/notifications";
+import { calendar } from "@/lib/calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +26,9 @@ async function handle(req: NextRequest) {
   const dryRun = req.nextUrl.searchParams.get("dry") === "1";
   try {
     const result = await runDefaultNotificationJob({ dryRun });
-    return NextResponse.json(result);
+    // Personal calendar entries whose last update/cancel failed are retried here.
+    const calendarRetry = dryRun ? null : await calendar.retryFailed().catch((e) => ({ error: String(e) }));
+    return NextResponse.json({ ...result, calendarRetry });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : "job failed" }, { status: 500 });
   }

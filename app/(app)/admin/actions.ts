@@ -10,6 +10,7 @@ import { getEmailProvider } from "@/lib/providers/email";
 import { renderSignInEmail } from "@/lib/notifications/templates";
 import { runDefaultNotificationJob } from "@/lib/notifications";
 import { env } from "@/lib/env";
+import { syncCalendarLinksWhere } from "@/lib/server/calendar-hooks";
 
 type Result = { ok: true; message?: string } | { ok: false; error: string };
 
@@ -52,6 +53,7 @@ export async function updateUser(raw: unknown): Promise<Result> {
         [s.profile.id, p.id, JSON.stringify(p)],
       );
     });
+    if (p.is_active === false || p.all_clocks_viewer === false) syncCalendarLinksWhere({ userId: p.id });
     revalidatePath("/admin");
     return { ok: true, message: "Updated." };
   } catch (e) {
@@ -131,6 +133,7 @@ export async function setClockArchived(raw: unknown): Promise<Result> {
     const s = await requireSuperAdmin();
     const p = z.object({ id: uuid, archived: z.boolean() }).parse(raw);
     await withUser(s.profile.id, (tx) => tx.query(`update clocks set archived_at = case when $2 then now() end where id = $1`, [p.id, p.archived]));
+    if (p.archived) syncCalendarLinksWhere({ clockId: p.id });
     revalidatePath("/", "layout");
     return { ok: true, message: p.archived ? "Archived." : "Restored." };
   } catch (e) {

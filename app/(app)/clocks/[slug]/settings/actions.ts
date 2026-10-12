@@ -12,6 +12,7 @@ import { getEmailProvider } from "@/lib/providers/email";
 import { ensureIdentity, generateSignInTokenHash } from "@/lib/providers/supabase/admin-identity";
 import { renderInviteEmail } from "@/lib/notifications/templates";
 import { env } from "@/lib/env";
+import { syncCalendarLinksWhere } from "@/lib/server/calendar-hooks";
 
 export type Result = { ok: true; message?: string } | { ok: false; error: string };
 
@@ -304,6 +305,7 @@ export async function removeMember(raw: unknown): Promise<Result> {
       await guardLastAdmin(tx, p.clock_id, p.user_id, null);
       await tx.query(`delete from clock_members where clock_id = $1 and user_id = $2`, [p.clock_id, p.user_id]);
     });
+    syncCalendarLinksWhere({ userId: p.user_id, clockId: p.clock_id }); // cancels entries they can no longer see
     revalidatePath("/clocks", "layout");
     return { ok: true, message: "Member removed." };
   } catch (e) {

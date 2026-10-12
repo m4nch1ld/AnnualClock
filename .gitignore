@@ -13,3 +13,4 @@ next-env.d.ts
 supabase/.temp/
 .DS_Store
 .next-build/
+.next-ci/

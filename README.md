@@ -4,13 +4,17 @@ A circular year planner ("annual clock") for ESL Shipping departments, inspired 
 Plandisc. Each department (Operations, Chartering, Crewing, Technical, Environmental,
 Safety, Shipbuilding, General management) has its own clock with rings, recurring
 activities and deadlines. **Reminders, escalations, Teams posts and calendar feeds
-reach people even when nobody opens the app.**
+reach people even when nobody opens the app.** Users can also put any activity into their own
+Outlook calendar with **Add to my Outlook**; the entry stays in sync with the clock
+([`docs/calendar.md`](docs/calendar.md)).
 
 | | |
 |---|---|
 | Stack | Next.js 16 (App Router, TypeScript strict) · Tailwind 4 · Supabase (Auth + Postgres) · plain `pg` + Row Level Security · Resend · Vercel Cron |
 | Tests | Vitest (unit, notification job, RLS on in-process Postgres) · Playwright smoke tests |
-| Docs | [`docs/authorization.md`](docs/authorization.md) · [`docs/notifications.md`](docs/notifications.md) · [`docs/azure-migration.md`](docs/azure-migration.md) · [`docs/backlog.md`](docs/backlog.md) |
+| Docs | [`AGENTS.md`](AGENTS.md) (handover / Azure build) · [`docs/azure-runbook.md`](docs/azure-runbook.md) · [`docs/authorization.md`](docs/authorization.md) · [`docs/notifications.md`](docs/notifications.md) · [`docs/calendar.md`](docs/calendar.md) · [`docs/azure-migration.md`](docs/azure-migration.md) · [`docs/backlog.md`](docs/backlog.md) |
+
+> **Building this on Azure?** Start with [`AGENTS.md`](AGENTS.md) and [`docs/azure-runbook.md`](docs/azure-runbook.md).
 
 ---
 
@@ -143,6 +147,9 @@ tests/ e2e/             Vitest and Playwright
   snooze and status are per occurrence (`activity_occurrences_state`). "This and future" edits split
   the series.
 - **Notifications**: see [`docs/notifications.md`](docs/notifications.md).
+- **Personal calendar** ("Add to my Outlook"): opt-in per activity; iCalendar invitations by email,
+  updated/cancelled when the activity changes; Microsoft Graph provider ready for Azure. See
+  [`docs/calendar.md`](docs/calendar.md).
 - **Theme**: ESL brand palette (green/teal accents, Poppins) in one file, `app/theme.css`.
 - **i18n**: strings in `lib/i18n/en.ts`; add `fi.ts` with the same keys for Finnish. Dates use
   `d.M.yyyy` for Finnish, weeks start on Monday (ISO weeks).

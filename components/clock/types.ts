@@ -21,4 +21,6 @@ export interface WorkspaceData {
   memberIds: Record<string, string[]>;
   perms: Record<string, ClockPerms>;
   currentUserId: string;
+  /** the current user's active "Add to my Outlook" links */
+  calendarLinks: Array<{ activity_id: string; scope: "series" | "occurrence"; occurrence_date: ISODate | null; pending: boolean }>;
 }

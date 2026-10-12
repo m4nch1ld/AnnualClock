@@ -37,6 +37,10 @@ export async function loadWorkspace(
       makeDate(year - 1, 1, 1),
       makeDate(year, 12, 31),
     );
+    const calendarLinks = await tx.query<WorkspaceData["calendarLinks"][number]>(
+      `select activity_id, scope, occurrence_date, (last_error is not null) as pending from calendar_links where user_id = $1 and status = 'active' and activity_id = any($2)`,
+      [uid, activities.map((a) => a.id)],
+    );
     const memberIds: Record<string, string[]> = {};
     for (const m of members) (memberIds[m.clock_id] ??= []).push(m.user_id);
     const perms: WorkspaceData["perms"] = {};
@@ -44,6 +48,6 @@ export async function loadWorkspace(
       const r = roleIn(session, c.id);
       perms[c.id] = { canEdit: canEdit(r), isAdmin: isAdmin(r) };
     }
-    return { mode, year, today, clocks, rings, activities, states, people, memberIds, perms, currentUserId: uid };
+    return { mode, year, today, clocks, rings, activities, states, people, memberIds, perms, currentUserId: uid, calendarLinks };
   });
 }
