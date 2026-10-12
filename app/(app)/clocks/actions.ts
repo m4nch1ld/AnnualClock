@@ -13,6 +13,7 @@ import { endSeriesBefore } from "@/lib/recurrence";
 import { activityInput, moveInput, occurrenceStatusInput, snoozeInput, uuid } from "@/lib/validation";
 import type { Activity } from "@/lib/domain";
 import { applyOccurrenceStatus, applySnooze } from "@/lib/server/occurrences";
+import { syncCalendarAfter, type CalendarChange } from "@/lib/server/calendar-hooks";
 
 export type ActionResult = { ok: true; id?: string } | { ok: false; error: string; fieldErrors?: Record<string, string> };
 
@@ -142,7 +143,8 @@ export async function saveActivity(raw: unknown): Promise<ActionResult> {
       tags: a.tags,
       links: a.links,
     };
-    return await withUser(uid, async (tx) => {
+    let change: CalendarChange | null = null;
+    const result = await withUser(uid, async (tx) => {
       await assertMembers(tx, a.clock_id, [...(a.owner_id ? [a.owner_id] : []), ...a.assignee_ids]);
       if (!a.id) {
         const id = await insertActivity(tx, a.clock_id, fields, uid);
@@ -155,6 +157,7 @@ export async function saveActivity(raw: unknown): Promise<ActionResult> {
       if (existing.rrule && a.occurrence_date) {
         if (a.scope === "future" && a.occurrence_date > existing.start_date) {
           const id = await splitSeries(tx, existing, a.occurrence_date, fields, a.assignee_ids, uid);
+          change = { activityIds: [existing.id, id], split: { fromId: existing.id, toId: id } };
           return { ok: true, id } as const;
         }
         // "all": the form shows the chosen occurrence's dates; shift the whole series by the same delta.
@@ -162,11 +165,15 @@ export async function saveActivity(raw: unknown): Promise<ActionResult> {
         const duration = fields.end_date ? diffDays(a.start_date, fields.end_date) : null;
         fields.start_date = addDays(existing.start_date, delta);
         fields.end_date = duration === null ? null : addDays(fields.start_date, duration);
+        if (delta) change = { activityIds: [a.id], shift: { activityId: a.id, days: delta } };
       }
       await updateActivity(tx, a.id, fields, uid);
       await setAssignees(tx, a.id, a.assignee_ids);
+      change ??= { activityIds: [a.id] };
       return { ok: true, id: a.id } as const;
     });
+    if (result.ok) syncCalendarAfter(change);
+    return result;
   } catch (e) {
     return fail(e);
   }
@@ -179,7 +186,8 @@ export async function moveActivity(raw: unknown): Promise<ActionResult> {
     const uid = session.profile.id;
     const m = moveInput.parse(raw);
     if (m.new_end && m.new_end < m.new_start) return { ok: false, error: "End date must be on or after start date." };
-    return await withUser(uid, async (tx) => {
+    let change: CalendarChange | null = null;
+    const result = await withUser(uid, async (tx) => {
       const existing = await getActivity(tx, m.activity_id);
       if (!existing) return { ok: false, error: "Activity not found." } as const;
       const duration = m.new_end ? diffDays(m.new_start, m.new_end) : null;
@@ -187,6 +195,7 @@ export async function moveActivity(raw: unknown): Promise<ActionResult> {
         const { assignee_ids, ...rest } = existing;
         const fields: Fields = { ...rest, start_date: m.new_start, end_date: m.new_end, links: existing.links };
         const id = await splitSeries(tx, existing, m.occurrence_date, fields, assignee_ids, uid);
+        change = { activityIds: [existing.id, id], split: { fromId: existing.id, toId: id } };
         return { ok: true, id } as const;
       }
       const start = existing.rrule ? addDays(existing.start_date, diffDays(m.occurrence_date, m.new_start)) : m.new_start;
@@ -196,8 +205,12 @@ export async function moveActivity(raw: unknown): Promise<ActionResult> {
         [m.activity_id, start, end, uid],
       );
       if (!rows.length) return { ok: false, error: "You do not have permission to do that." } as const;
+      const shift = diffDays(existing.start_date, start);
+      change = { activityIds: [m.activity_id], ...(existing.rrule && shift ? { shift: { activityId: m.activity_id, days: shift } } : {}) };
       return { ok: true, id: m.activity_id } as const;
     });
+    if (result.ok) syncCalendarAfter(change);
+    return result;
   } catch (e) {
     return fail(e);
   }
@@ -209,6 +222,7 @@ export async function setOccurrenceStatus(raw: unknown): Promise<ActionResult> {
     const session = await requireSession();
     const input = occurrenceStatusInput.parse(raw);
     await withUser(session.profile.id, (tx) => applyOccurrenceStatus(tx, input, session.profile.id));
+    syncCalendarAfter({ activityIds: [input.activity_id] });
     return { ok: true };
   } catch (e) {
     return fail(e);
@@ -236,7 +250,9 @@ export async function deleteActivity(id: string): Promise<ActionResult> {
         session.profile.id,
       ]),
     );
-    return rows.length ? { ok: true } : { ok: false, error: "You do not have permission to do that." };
+    if (!rows.length) return { ok: false, error: "You do not have permission to do that." };
+    syncCalendarAfter({ activityIds: [aid] }); // sends cancellations
+    return { ok: true };
   } catch (e) {
     return fail(e);
   }
@@ -277,4 +293,49 @@ export async function getActivityHistory(id: string): Promise<HistoryEntry[]> {
     if (r.entity === "activity_assignees") summary = r.action === "insert" ? "Assignee added" : "Assignee removed";
     return { id: r.id, action: r.action, entity: r.entity, actor: r.actor, created_at: r.created_at, fields, summary };
   });
+}
+
+// ---------------------------------------------------------------------------
+// "Add to my Outlook"
+// ---------------------------------------------------------------------------
+const calendarInput = z.object({
+  activity_id: uuid,
+  scope: z.enum(["series", "occurrence"]),
+  occurrence_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+});
+
+/** Put an activity (all occurrences) or one occurrence into the user's own calendar. Anyone who can read the clock may. */
+export async function addToMyCalendar(raw: unknown): Promise<ActionResult> {
+  try {
+    const session = await requireSession();
+    const p = calendarInput.parse(raw);
+    const a = await withUser(session.profile.id, (tx) => getActivity(tx, p.activity_id)); // RLS: must be readable
+    if (!a) return { ok: false, error: "Activity not found." };
+    const scope = a.rrule ? p.scope : "series";
+    if (scope === "occurrence" && !p.occurrence_date) return { ok: false, error: "Missing occurrence date." };
+    const { calendar } = await import("@/lib/calendar");
+    const r = await calendar.add({
+      userId: session.profile.id,
+      activityId: a.id,
+      scope,
+      occurrenceDate: scope === "occurrence" ? p.occurrence_date : null,
+    });
+    // Provider details are logged server-side (job: calendar); the link stays queued and is retried by the scheduler.
+    return r.ok ? { ok: true, id: r.linkId } : { ok: false, error: "The calendar invitation could not be delivered right now. It will be retried automatically." };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function removeFromMyCalendar(raw: unknown): Promise<ActionResult> {
+  try {
+    const session = await requireSession();
+    const p = calendarInput.parse(raw);
+    const { calendar } = await import("@/lib/calendar");
+    const r = await calendar.remove({ userId: session.profile.id, activityId: p.activity_id, occurrenceDate: p.scope === "occurrence" ? p.occurrence_date : null });
+    if (!r.ok) console.error(JSON.stringify({ level: "warn", job: "calendar", msg: "remove failed", error: r.error }));
+    return r.ok ? { ok: true } : { ok: false, error: "Could not remove it from your calendar right now. Please try again later." };
+  } catch (e) {
+    return fail(e);
+  }
 }

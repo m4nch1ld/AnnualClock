@@ -3,26 +3,16 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * Boots an in-process Postgres (PGlite) with a minimal Supabase-compatible
- * shim (roles + auth.uid()) and applies every migration in supabase/migrations.
+ * Boots an in-process Postgres (PGlite), applies supabase/bootstrap/plain-postgres.sql
+ * (the same bootstrap used on Azure) and every migration in supabase/migrations.
  * Lets RLS tests run without Docker or a hosted project.
  */
 export async function createTestDb() {
   const db = new PGlite();
-  await db.exec(`
-    create role anon nologin;
-    create role authenticated nologin;
-    create role service_role nologin bypassrls;
-    create schema auth;
-    create function auth.uid() returns uuid language sql stable as $$
-      select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
-    $$;
-    grant usage on schema auth to anon, authenticated, service_role;
-    grant usage on schema public to anon, authenticated, service_role;
-    alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-    alter default privileges in schema public grant all on sequences to anon, authenticated, service_role;
-    alter default privileges in schema public grant execute on functions to anon, authenticated, service_role;
-  `);
+  // Same bootstrap the Azure / plain-Postgres deployment uses (roles, auth.uid(), default grants).
+  await db.exec(readFileSync(join(process.cwd(), "supabase", "bootstrap", "plain-postgres.sql"), "utf8"));
+  // Test-only: the service role bypasses RLS like Supabase's.
+  await db.exec("alter role service_role bypassrls");
   const dir = join(process.cwd(), "supabase", "migrations");
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
     await db.exec(readFileSync(join(dir, file), "utf8"));

@@ -244,6 +244,21 @@ describe("privileged data", () => {
   });
 });
 
+describe("calendar links", () => {
+  test("users see only their own calendar links and cannot write them directly", async () => {
+    await db.query(
+      `insert into calendar_links (user_id, activity_id, scope, uid) values ($1, $2, 'series', 'uid-1'), ($3, $2, 'series', 'uid-2')`,
+      [U.envDirector, A.env, U.viewer],
+    );
+    await asUser(db, U.envDirector, async (q) => {
+      expect(count(await q(`select count(*)::int n from calendar_links`))).toBe(1);
+    });
+    await expect(
+      asUser(db, U.viewer, (q) => q(`insert into calendar_links (user_id, activity_id, scope, uid) values ($1, $2, 'series', 'x')`, [U.viewer, A.env])),
+    ).rejects.toThrow(/permission denied/);
+  });
+});
+
 describe("audit log", () => {
   test("changes are recorded with the acting user", async () => {
     await asUser(db, U.envDirector, (q) => q(`update activities set title = 'EUA verification' where id = $1`, [A.env]));

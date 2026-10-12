@@ -14,6 +14,8 @@ import {
   saveActivity,
   setOccurrenceStatus,
   snoozeOccurrence,
+  addToMyCalendar,
+  removeFromMyCalendar,
   type ActionResult,
   type HistoryEntry,
 } from "@/app/(app)/clocks/actions";
@@ -257,6 +259,8 @@ function ViewMode({
           </Button>
         </div>
       )}
+
+      <CalendarSection occ={occ} data={data} onSaved={onSaved} />
 
       <div className="border-t border-border pt-3">
         {history === null ? (
@@ -632,5 +636,63 @@ function MoveConfirm({
         </Button>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// "Add to my Outlook" (personal calendar; reminders still come by email)
+// ---------------------------------------------------------------------------
+function CalendarSection({ occ, data, onSaved }: { occ: Occurrence; data: WorkspaceData; onSaved: (m?: string) => void }) {
+  const a = occ.activity;
+  const series = data.calendarLinks.find((l) => l.activity_id === a.id && l.scope === "series");
+  const single = data.calendarLinks.find((l) => l.activity_id === a.id && l.scope === "occurrence" && l.occurrence_date === occ.date);
+  const [pending, start] = useTransition();
+  const [result, setResult] = useState<ActionResult | null>(null);
+  const run = (fn: () => Promise<ActionResult>, msg: string) =>
+    start(async () => {
+      const r = await fn();
+      setResult(r);
+      if (r.ok) onSaved(msg);
+    });
+  const add = (scope: "series" | "occurrence") =>
+    run(() => addToMyCalendar({ activity_id: a.id, scope, occurrence_date: scope === "occurrence" ? occ.date : null }), t("activity.calendar.sent"));
+  const remove = (scope: "series" | "occurrence") =>
+    run(() => removeFromMyCalendar({ activity_id: a.id, scope, occurrence_date: scope === "occurrence" ? occ.date : null }), t("activity.calendar.removed"));
+  const download = `/api/activities/${a.id}/ics${occ.recurring ? `?occ=${occ.date}` : ""}`;
+
+  return (
+    <section aria-label={t("activity.calendar.title")} className="space-y-2 border-t border-border pt-3">
+      <h3 className="text-sm font-medium">{t("activity.calendar.title")}</h3>
+      {series || single ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {(series ?? single)!.pending ? (
+            <span className="text-warning">⏳ {t("activity.calendar.pending")}</span>
+          ) : (
+            <span className="text-success">✓ {series ? t("activity.calendar.inCalendarSeries") : t("activity.calendar.inCalendarOccurrence")}</span>
+          )}
+          <Button variant="link" size="sm" className="px-0 text-danger" disabled={pending} onClick={() => remove(series ? "series" : "occurrence")}>
+            {t("activity.calendar.remove")}
+          </Button>
+        </div>
+      ) : (
+        <>
+          <p className="text-xs text-muted">{t("activity.calendar.intro")}</p>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" size="sm" disabled={pending} onClick={() => add("series")}>
+              📅 {occ.recurring ? t("activity.calendar.addSeries") : t("activity.calendar.addOne")}
+            </Button>
+            {occ.recurring && (
+              <Button variant="outline" size="sm" disabled={pending} onClick={() => add("occurrence")}>
+                {t("activity.calendar.addOccurrence")}
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+      <a href={download} className="block text-xs text-primary underline">
+        {t("activity.calendar.download")}
+      </a>
+      <ErrorBox result={result} />
+    </section>
   );
 }

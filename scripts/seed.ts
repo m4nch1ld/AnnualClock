@@ -7,6 +7,7 @@
  *   npm run seed
  */
 import "./load-env";
+import { createHash } from "node:crypto";
 import { ensureIdentity } from "../lib/providers/supabase/admin-identity";
 import { closePool, withService, type Tx } from "../lib/db";
 import { expandOccurrences } from "../lib/recurrence";
@@ -139,10 +140,17 @@ const ACTIVITIES: SeedActivity[] = [
 async function main() {
   console.log(`Seeding demo data (demo email base: ${base})`);
 
-  // 1) identities (auth provider) — done outside the DB transaction
+  // 1) identities — Supabase Auth when configured; otherwise (e.g. Azure before Entra ID is wired)
+  //    deterministic ids derived from the email. Profiles can later be re-keyed to Entra object ids.
+  const useSupabase = !!(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const localId = (email: string) => {
+    const h = createHash("sha1").update(`annual-clock:${email.toLowerCase()}`).digest("hex");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+  };
+  console.log(`  identities: ${useSupabase ? "Supabase Auth" : "local deterministic ids (no auth provider configured)"}`);
   const ids = {} as Record<UserKey, string>;
   for (const u of USERS) {
-    ids[u.key] = (await ensureIdentity(u.email)).id;
+    ids[u.key] = useSupabase ? (await ensureIdentity(u.email)).id : localId(u.email);
     console.log(`  user ${u.email} -> ${ids[u.key]}`);
   }
 
