@@ -12,6 +12,11 @@ Not implemented on purpose (out of scope or "if time permits"). Candidates for t
 - Attachments (evidence of completion, e.g. verification report) — storage interface exists conceptually.
 - Per-activity "completion requires note/evidence".
 
+## Calendar
+- Switch "Add to my Outlook" to the Microsoft Graph provider after Entra ID (docs/calendar.md).
+- "Add all my activities" bulk action; optional VALARM per user preference.
+- Reflect per-occurrence completion in the calendar entry (e.g. ✓ prefix) if users want it.
+
 ## Notifications
 - SMS (Twilio) and Web Push channels (interface ready, see docs/notifications.md).
 - Per-user send time and quiet hours; Finnish email templates.
