@@ -2,7 +2,7 @@
 
 The prototype was built so that moving from Supabase + Vercel to Azure is mostly
 configuration. Business logic lives in `/lib` as plain TypeScript, the data model is standard
-PostgreSQL 16+, and every external service sits behind a small interface.
+T-SQL on Azure SQL Database (the factory's default), and every external service sits behind a small interface.
 
 **Step-by-step instructions: [`azure-runbook.md`](azure-runbook.md).** This page is the overview.
 
@@ -11,7 +11,7 @@ PostgreSQL 16+, and every external service sits behind a small interface.
 | Prototype | Azure | What changes in the code |
 |---|---|---|
 | Supabase Auth (email magic link) | **Microsoft Entra ID** (OIDC, M365 single sign-on) | New `AuthProvider` + `/auth/login` and `/auth/callback` routes; `profiles.external_id` column; remove `lib/providers/supabase` (runbook §7) |
-| Supabase Postgres | **Azure Database for PostgreSQL Flexible Server** (PG 16) | none — run `supabase/bootstrap/plain-postgres.sql` once, then the same migrations (tested on every `npm test`) |
+| Supabase Postgres (prototype, replaced) | **Azure SQL Database** — shared database, schema `annual_clock` | **done**: T-SQL migrations in `database/migrations`, `mssql` + Entra workload identity in `lib/db` (runbook §3). |
 | RLS via `withUser()` | unchanged | none |
 | Vercel Cron → `/api/cron/notifications` | **Container Apps Job** (hourly `curl` with `CRON_SECRET`), or Azure Functions timer | none (or ~20 lines for a Function, below) |
 | Resend (`EmailProvider`) | **Azure Communication Services Email** via SMTP | none — `EMAIL_PROVIDER=smtp` + `SMTP_*` (already implemented) |
@@ -19,7 +19,7 @@ PostgreSQL 16+, and every external service sits behind a small interface.
 | Vercel hosting | **Azure Container Apps** (`Dockerfile`, `output: "standalone"`) | none |
 | Vercel env vars | **Key Vault** references in Container Apps | config |
 | Teams webhooks | unchanged | none |
-| Rate limiting (Postgres table) | unchanged (optionally Front Door WAF) | none |
+| Rate limiting (database table) | unchanged (optionally Front Door WAF) | none |
 
 ## Identity: keep internal ids
 
@@ -54,7 +54,7 @@ Needs the same env vars as the app (`DATABASE_URL`, `APP_TOKEN_SECRET`, `APP_BAS
 
 ## Checklist
 
-- [ ] Bootstrap SQL + migrations on Azure Postgres (runbook §3)
+- [ ] App schema + contained users on the shared Azure SQL database, then `npm run db:migrate` (runbook §3)
 - [ ] ACS Email with verified ESL subdomain; `EMAIL_PROVIDER=smtp` (runbook §6)
 - [ ] Entra `AuthProvider`, `profiles.external_id`, Supabase removed (runbook §7)
 - [ ] Container App with Key Vault secrets (runbook §4–5)
