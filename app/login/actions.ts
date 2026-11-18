@@ -6,7 +6,7 @@ import { auth } from "@/lib/server/auth";
 import { createDemoSession } from "@/lib/providers/supabase/auth";
 import { clientIp, rateLimit } from "@/lib/server/rate-limit";
 import { safeNext } from "@/lib/server/safe-redirect";
-import { withService } from "@/lib/db";
+import { S, withService } from "@/lib/db";
 import { env } from "@/lib/env";
 
 export type LoginState = { status: "idle" | "sent" | "error"; message?: string };
@@ -35,7 +35,7 @@ export async function demoLoginAction(form: FormData) {
   if (!env().DEMO_LOGIN_ENABLED) throw new Error("Demo login is disabled");
   const email = emailSchema.parse(String(form.get("email") ?? ""));
   const isDemo = await withService((tx) =>
-    tx.one<{ ok: boolean }>(`select true as ok from profiles where lower(email) = $1 and is_demo and is_active`, [email]),
+    tx.one<{ ok: boolean }>(`select cast(1 as bit) as ok from ${S}.profiles where lower(email) = $1 and is_demo = 1 and is_active = 1`, [email]),
   );
   if (!isDemo) throw new Error("Not a demo user");
   const user = await createDemoSession(email);

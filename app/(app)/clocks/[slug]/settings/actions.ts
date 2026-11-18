@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/server/session";
-import { withService, withUser, type Tx } from "@/lib/db";
+import { S, withService, withUser, type Tx } from "@/lib/db";
 import { hexColor, offsetsSchema, roleSchema, uuid } from "@/lib/validation";
 import { defaultJobDeps } from "@/lib/notifications";
 import { sendTestNotification } from "@/lib/notifications/test-send";
@@ -26,7 +26,10 @@ function failure(e: unknown): Result {
 }
 
 async function assertAdmin(tx: Tx, clockId: string) {
-  const row = await tx.one<{ ok: boolean }>(`select app.is_clock_admin($1) as ok`, [clockId]);
+  const row = await tx.one<{ ok: boolean }>(
+    `select cast(case when exists (select 1 from ${S}.rls_admin_clock($1)) then 1 else 0 end as bit) as ok`,
+    [clockId],
+  );
   if (!row?.ok) throw new Error("not an admin");
 }
 
@@ -59,8 +62,9 @@ export async function saveNotificationSettings(raw: unknown): Promise<Result> {
   try {
     const p = notifInput.parse(raw);
     await asAdmin(p.clock_id, (tx) =>
-      tx.query(
-        `update clocks set default_reminder_offsets = $2, default_send_time = $3, escalation_config = $4, teams_enabled = $5 where id = $1`,
+      tx.exec(
+        `update ${S}.clocks set default_reminder_offsets = $2, default_send_time = $3, escalation_config = $4, teams_enabled = $5,
+           updated_at = sysdatetimeoffset() where id = $1`,
         [
           p.clock_id,
           [...new Set(p.default_reminder_offsets)].sort((a, b) => b - a),
@@ -104,9 +108,9 @@ export async function setTeamsWebhook(raw: unknown): Promise<Result> {
     await asAdmin(p.clock_id, async () => {
       // Secrets table is server-only (no RLS policies): write with the service connection after the admin check.
       await withService((tx) =>
-        tx.query(
-          `insert into clock_secrets (clock_id, teams_webhook_url) values ($1, $2)
-           on conflict (clock_id) do update set teams_webhook_url = excluded.teams_webhook_url`,
+        tx.exec(
+          `update ${S}.clock_secrets with (updlock, holdlock) set teams_webhook_url = $2, updated_at = sysdatetimeoffset() where clock_id = $1;
+           if @@rowcount = 0 insert into ${S}.clock_secrets (clock_id, teams_webhook_url) values ($1, $2);`,
           [p.clock_id, p.url || null],
         ),
       );
@@ -127,13 +131,13 @@ export async function sendTest(raw: unknown): Promise<Result> {
     const data = await withService(async (tx) => {
       const clock = await tx.one<ClockInfo>(
         `select c.id, c.name, c.slug, c.color, c.description, c.default_reminder_offsets, c.escalation_config,
-           to_char(c.default_send_time, 'HH24:MI') as default_send_time, c.teams_enabled, c.is_general_management, c.position,
-           coalesce(s.teams_webhook_url, '') <> '' as has_teams_webhook
-         from clocks c left join clock_secrets s on s.clock_id = c.id where c.id = $1`,
+           c.default_send_time, c.teams_enabled, c.is_general_management, c.position,
+           cast(case when coalesce(s.teams_webhook_url, N'') <> N'' then 1 else 0 end as bit) as has_teams_webhook
+         from ${S}.clocks c left join ${S}.clock_secrets s on s.clock_id = c.id where c.id = $1`,
         [p.clock_id],
       );
       const user = await tx.one<UserInfo>(
-        `select id, email, full_name, locale, is_active, all_clocks_viewer, global_role, weekly_digest from profiles where id = $1`,
+        `select id, email, full_name, locale, is_active, all_clocks_viewer, global_role, weekly_digest from ${S}.profiles where id = $1`,
         [s.profile.id],
       );
       return { clock: clock!, user: user! };
@@ -163,7 +167,7 @@ export async function saveGeneral(raw: unknown): Promise<Result> {
   try {
     const p = generalInput.parse(raw);
     await asAdmin(p.clock_id, (tx) =>
-      tx.query(`update clocks set name = $2, color = $3, description = $4 where id = $1`, [p.clock_id, p.name, p.color, p.description || null]),
+      tx.exec(`update ${S}.clocks set name = $2, color = $3, description = $4, updated_at = sysdatetimeoffset() where id = $1`, [p.clock_id, p.name, p.color, p.description || null]),
     );
     revalidatePath("/clocks", "layout");
     return { ok: true, message: "Saved." };
@@ -185,11 +189,11 @@ export async function saveRing(raw: unknown): Promise<Result> {
     const p = ringInput.parse(raw);
     await asAdmin(p.clock_id, async (tx) => {
       if (p.id) {
-        await tx.query(`update rings set name = $3, color = $4, hidden = $5 where id = $1 and clock_id = $2`, [p.id, p.clock_id, p.name, p.color, p.hidden]);
+        await tx.exec(`update ${S}.rings set name = $3, color = $4, hidden = $5, updated_at = sysdatetimeoffset() where id = $1 and clock_id = $2`, [p.id, p.clock_id, p.name, p.color, p.hidden]);
       } else {
-        await tx.query(
-          `insert into rings (clock_id, name, color, hidden, position)
-           values ($1, $2, $3, $4, coalesce((select max(position) + 1 from rings where clock_id = $1), 0))`,
+        await tx.exec(
+          `insert into ${S}.rings (clock_id, name, color, hidden, position)
+           values ($1, $2, $3, $4, coalesce((select max(position) + 1 from ${S}.rings where clock_id = $1), 0))`,
           [p.clock_id, p.name, p.color, p.hidden],
         );
       }
@@ -205,12 +209,12 @@ export async function moveRing(raw: unknown): Promise<Result> {
   try {
     const p = z.object({ clock_id: uuid, id: uuid, direction: z.enum(["up", "down"]) }).parse(raw);
     await asAdmin(p.clock_id, async (tx) => {
-      const rings = await tx.query<{ id: string }>(`select id from rings where clock_id = $1 order by position, name`, [p.clock_id]);
+      const rings = await tx.query<{ id: string }>(`select id from ${S}.rings where clock_id = $1 order by position, name`, [p.clock_id]);
       const i = rings.findIndex((r) => r.id === p.id);
       const j = p.direction === "up" ? i - 1 : i + 1;
       if (i < 0 || j < 0 || j >= rings.length) return;
       [rings[i], rings[j]] = [rings[j], rings[i]];
-      for (const [pos, r] of rings.entries()) await tx.query(`update rings set position = $2 where id = $1`, [r.id, pos]);
+      for (const [pos, r] of rings.entries()) await tx.exec(`update ${S}.rings set position = $2, updated_at = sysdatetimeoffset() where id = $1`, [r.id, pos]);
     });
     revalidatePath("/clocks", "layout");
     return { ok: true };
@@ -223,9 +227,9 @@ export async function deleteRing(raw: unknown): Promise<Result> {
   try {
     const p = z.object({ clock_id: uuid, id: uuid }).parse(raw);
     const r = await asAdmin(p.clock_id, async (tx) => {
-      const used = await tx.one<{ n: number }>(`select count(*)::int as n from activities where ring_id = $1`, [p.id]);
+      const used = await tx.one<{ n: number }>(`select count(*) as n from ${S}.activities where ring_id = $1`, [p.id]);
       if (used && used.n > 0) return { ok: false as const, error: `The ring has ${used.n} activities. Move them to another ring first, or hide the ring instead (deleted activities are kept for the audit trail).` };
-      await tx.query(`delete from rings where id = $1 and clock_id = $2`, [p.id, p.clock_id]);
+      await tx.exec(`delete from ${S}.rings where id = $1 and clock_id = $2`, [p.id, p.clock_id]);
       return { ok: true as const };
     });
     revalidatePath("/clocks", "layout");
@@ -250,19 +254,19 @@ export async function inviteMember(raw: unknown): Promise<Result> {
   try {
     const p = inviteInput.parse(raw);
     const s = await requireSession();
-    const clock = await asAdmin(p.clock_id, (tx) => tx.one<{ name: string; slug: string }>(`select name, slug from clocks where id = $1`, [p.clock_id]));
+    const clock = await asAdmin(p.clock_id, (tx) => tx.one<{ name: string; slug: string }>(`select name, slug from ${S}.clocks where id = $1`, [p.clock_id]));
     const { id } = await ensureIdentity(p.email);
     await withService((tx) =>
-      tx.query(
-        `insert into profiles (id, email, full_name) values ($1, $2, $3)
-         on conflict (id) do update set email = excluded.email, full_name = coalesce(profiles.full_name, excluded.full_name)`,
+      tx.exec(
+        `update ${S}.profiles with (updlock, holdlock) set email = $2, full_name = coalesce(full_name, $3), updated_at = sysdatetimeoffset() where id = $1;
+         if @@rowcount = 0 insert into ${S}.profiles (id, email, full_name) values ($1, $2, $3);`,
         [id, p.email, p.full_name || null],
       ),
     );
     await withUser(s.profile.id, (tx) =>
-      tx.query(
-        `insert into clock_members (clock_id, user_id, role) values ($1, $2, $3)
-         on conflict (clock_id, user_id) do update set role = excluded.role`,
+      tx.exec(
+        `update ${S}.clock_members with (updlock, holdlock) set role = $3, updated_at = sysdatetimeoffset() where clock_id = $1 and user_id = $2;
+         if @@rowcount = 0 insert into ${S}.clock_members (clock_id, user_id, role) values ($1, $2, $3);`,
         [p.clock_id, id, p.role],
       ),
     );
@@ -289,7 +293,7 @@ export async function setMemberRole(raw: unknown): Promise<Result> {
     const p = z.object({ clock_id: uuid, user_id: uuid, role: roleSchema }).parse(raw);
     await asAdmin(p.clock_id, async (tx) => {
       await guardLastAdmin(tx, p.clock_id, p.user_id, p.role);
-      await tx.query(`update clock_members set role = $3 where clock_id = $1 and user_id = $2`, [p.clock_id, p.user_id, p.role]);
+      await tx.exec(`update ${S}.clock_members set role = $3, updated_at = sysdatetimeoffset() where clock_id = $1 and user_id = $2`, [p.clock_id, p.user_id, p.role]);
     });
     revalidatePath("/clocks", "layout");
     return { ok: true, message: "Role updated." };
@@ -303,7 +307,7 @@ export async function removeMember(raw: unknown): Promise<Result> {
     const p = z.object({ clock_id: uuid, user_id: uuid }).parse(raw);
     await asAdmin(p.clock_id, async (tx) => {
       await guardLastAdmin(tx, p.clock_id, p.user_id, null);
-      await tx.query(`delete from clock_members where clock_id = $1 and user_id = $2`, [p.clock_id, p.user_id]);
+      await tx.exec(`delete from ${S}.clock_members where clock_id = $1 and user_id = $2`, [p.clock_id, p.user_id]);
     });
     syncCalendarLinksWhere({ userId: p.user_id, clockId: p.clock_id }); // cancels entries they can no longer see
     revalidatePath("/clocks", "layout");
@@ -314,7 +318,7 @@ export async function removeMember(raw: unknown): Promise<Result> {
 }
 
 async function guardLastAdmin(tx: Tx, clockId: string, userId: string, newRole: string | null) {
-  const admins = await tx.query<{ user_id: string }>(`select user_id from clock_members where clock_id = $1 and role = 'admin'`, [clockId]);
+  const admins = await tx.query<{ user_id: string }>(`select user_id from ${S}.clock_members where clock_id = $1 and role = N'admin'`, [clockId]);
   if (admins.length === 1 && admins[0].user_id === userId && newRole !== "admin") {
     throw new z.ZodError([{ code: "custom", path: ["role"], message: "A clock needs at least one admin", input: newRole }]);
   }

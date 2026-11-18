@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/server/auth";
 import { safeNext } from "@/lib/server/safe-redirect";
-import { withService } from "@/lib/db";
+import { S, withService } from "@/lib/db";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { t } from "@/lib/i18n";
@@ -30,7 +30,7 @@ export default async function ConfirmPage({
     const user = await auth.completeSignIn(params);
     if (!user) redirect("/login?error=link");
     const active = await withService((tx) =>
-      tx.one<{ is_active: boolean }>(`select is_active from profiles where id = $1`, [user.id]),
+      tx.one<{ is_active: boolean }>(`select is_active from ${S}.profiles where id = $1`, [user.id]),
     );
     if (!active?.is_active) {
       await auth.signOut();

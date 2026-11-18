@@ -9,7 +9,8 @@
 import "./load-env";
 import { createHash } from "node:crypto";
 import { ensureIdentity } from "../lib/providers/supabase/admin-identity";
-import { closePool, withService, type Tx } from "../lib/db";
+import { randomUUID } from "node:crypto";
+import { S, closePool, withService, type Tx } from "../lib/db";
 import { expandOccurrences } from "../lib/recurrence";
 import { addDays, todayInZone } from "../lib/dates";
 
@@ -155,16 +156,33 @@ async function main() {
   }
 
   await withService(async (tx: Tx) => {
-    // 2) reset demo rows (cascades to rings, members, activities, logs)
-    await tx.query(`delete from clocks where is_demo`);
+    // 2) reset demo rows. Foreign keys don't cascade (SQL Server), so delete children first.
+    const demo = `(select id from ${S}.clocks where is_demo = 1)`;
+    const demoActs = `(select id from ${S}.activities where clock_id in ${demo})`;
+    await tx.exec(`
+      delete from ${S}.calendar_links where activity_id in ${demoActs};
+      delete from ${S}.notification_log where clock_id in ${demo} or activity_id in ${demoActs};
+      delete from ${S}.in_app_notifications where clock_id in ${demo} or activity_id in ${demoActs};
+      delete from ${S}.activity_assignees where clock_id in ${demo};
+      delete from ${S}.activity_occurrences_state where clock_id in ${demo};
+      update ${S}.activities set predecessor_id = null, series_parent_id = null where clock_id in ${demo};
+      delete from ${S}.activities where clock_id in ${demo};
+      delete from ${S}.rings where clock_id in ${demo};
+      delete from ${S}.notification_prefs where clock_id in ${demo};
+      delete from ${S}.clock_members where clock_id in ${demo};
+      delete from ${S}.ics_tokens where clock_id in ${demo};
+      delete from ${S}.clock_secrets where clock_id in ${demo};
+      delete from ${S}.audit_log where clock_id in ${demo};
+      delete from ${S}.clocks where is_demo = 1;`);
 
     // 3) profiles
     for (const u of USERS) {
-      await tx.query(
-        `insert into profiles (id, email, full_name, global_role, all_clocks_viewer, is_active, is_demo, weekly_digest)
-         values ($1, $2, $3, $4, $5, true, true, $6)
-         on conflict (id) do update set email = excluded.email, full_name = excluded.full_name,
-           global_role = excluded.global_role, all_clocks_viewer = excluded.all_clocks_viewer, is_active = true, is_demo = true`,
+      await tx.exec(
+        `update ${S}.profiles set email = $2, full_name = $3, global_role = $4, all_clocks_viewer = $5, is_active = 1, is_demo = 1,
+           updated_at = sysdatetimeoffset() where id = $1;
+         if @@rowcount = 0
+           insert into ${S}.profiles (id, email, full_name, global_role, all_clocks_viewer, is_active, is_demo, weekly_digest)
+           values ($1, $2, $3, $4, $5, 1, 1, $6);`,
         [ids[u.key], u.email, u.name, u.global_role, u.gm, u.key === "gm" || u.key === "envdir"],
       );
     }
@@ -173,47 +191,47 @@ async function main() {
     const clockIds: Record<string, string> = {};
     const ringIds: Record<string, string[]> = {};
     for (const [i, c] of CLOCKS.entries()) {
-      const row = await tx.one<{ id: string }>(
-        `insert into clocks (name, slug, color, description, is_general_management, position, is_demo)
-         values ($1, $2, $3, $4, $5, $6, true) returning id`,
-        [c.name, c.slug, c.color, c.description, !!c.gm, i],
+      const row = { id: randomUUID() };
+      await tx.exec(
+        `insert into ${S}.clocks (id, name, slug, color, description, is_general_management, position, is_demo)
+         values ($7, $1, $2, $3, $4, $5, $6, 1)`,
+        [c.name, c.slug, c.color, c.description, !!c.gm, i, row.id],
       );
-      clockIds[c.slug] = row!.id;
+      clockIds[c.slug] = row.id;
       ringIds[c.slug] = [];
       for (const [j, [name, color]] of c.rings.entries()) {
-        const r = await tx.one<{ id: string }>(
-          `insert into rings (clock_id, name, color, position) values ($1, $2, $3, $4) returning id`,
-          [row!.id, name, color, j],
-        );
+        const r = { id: randomUUID() };
+        await tx.exec(`insert into ${S}.rings (id, clock_id, name, color, position) values ($5, $1, $2, $3, $4)`, [row.id, name, color, j, r.id]);
         ringIds[c.slug].push(r!.id);
       }
     }
 
     // 5) memberships + prefs
     for (const [user, slug, role] of MEMBERS) {
-      await tx.query(`insert into clock_members (clock_id, user_id, role) values ($1, $2, $3)`, [clockIds[slug], ids[user], role]);
+      await tx.exec(`insert into ${S}.clock_members (clock_id, user_id, role) values ($1, $2, $3)`, [clockIds[slug], ids[user], role]);
     }
-    await tx.query(
-      `insert into notification_prefs (user_id, clock_id, enabled, channels, subscribe_all) values ($1, $2, true, '{email,in_app}', true)`,
+    await tx.exec(
+      `insert into ${S}.notification_prefs (user_id, clock_id, enabled, channels, subscribe_all) values ($1, $2, 1, N'["email","in_app"]', 1)`,
       [ids.envteam, clockIds.environmental],
     );
 
     // 6) activities
     const actIds: Record<string, string> = {};
     for (const a of ACTIVITIES) {
-      const row = await tx.one<{ id: string }>(
-        `insert into activities (clock_id, ring_id, title, description, type, start_date, end_date, rrule, owner_id,
+      const row = { id: randomUUID() };
+      await tx.exec(
+        `insert into ${S}.activities (id, clock_id, ring_id, title, description, type, start_date, end_date, rrule, owner_id,
            reminder_offsets, predecessor_id, tags, links, is_demo, created_by, updated_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,$9,$9) returning id`,
+         values ($14,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$9,$9)`,
         [
           clockIds[a.clock], ringIds[a.clock][a.ring], a.title, a.description ?? null, a.type, a.start, a.end ?? null,
           a.rrule ?? null, ids[a.owner], a.reminders ?? null, a.predecessor ? actIds[a.predecessor] : null,
-          a.tags ?? [], JSON.stringify(a.links ?? []),
+          a.tags ?? [], JSON.stringify(a.links ?? []), row.id,
         ],
       );
-      actIds[a.key] = row!.id;
+      actIds[a.key] = row.id;
       for (const as of a.assignees ?? []) {
-        await tx.query(`insert into activity_assignees (activity_id, user_id) values ($1, $2)`, [row!.id, ids[as]]);
+        await tx.exec(`insert into ${S}.activity_assignees (activity_id, clock_id, user_id) values ($1, $3, $2)`, [row.id, ids[as], clockIds[a.clock]]);
       }
       // Past occurrences of recurring demo items are marked done so only deliberate items are overdue.
       const today = todayInZone();
@@ -223,10 +241,10 @@ async function main() {
             .map((o) => o.date)
         : [];
       for (const occ of new Set([...(a.doneOccurrences ?? []), ...past])) {
-        await tx.query(
-          `insert into activity_occurrences_state (activity_id, occurrence_date, status, completed_at, completed_by, updated_by)
-           values ($1, $2, 'done', now(), $3, $3)`,
-          [row!.id, occ, ids[a.owner]],
+        await tx.exec(
+          `insert into ${S}.activity_occurrences_state (activity_id, clock_id, occurrence_date, status, completed_at, completed_by, updated_by)
+           values ($1, $4, $2, N'done', sysdatetimeoffset(), $3, $3)`,
+          [row.id, occ, ids[a.owner], clockIds[a.clock]],
         );
       }
     }

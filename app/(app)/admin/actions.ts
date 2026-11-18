@@ -3,7 +3,8 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/server/session";
-import { withService, withUser } from "@/lib/db";
+import { randomUUID } from "node:crypto";
+import { S, withService, withUser } from "@/lib/db";
 import { hexColor, uuid } from "@/lib/validation";
 import { ensureIdentity, generateSignInTokenHash } from "@/lib/providers/supabase/admin-identity";
 import { getEmailProvider } from "@/lib/providers/email";
@@ -45,12 +46,12 @@ export async function updateUser(raw: unknown): Promise<Result> {
       return { ok: false, error: "You cannot deactivate or demote yourself." };
     }
     await withService(async (tx) => {
-      if (p.is_active !== undefined) await tx.query(`update profiles set is_active = $2 where id = $1`, [p.id, p.is_active]);
-      if (p.all_clocks_viewer !== undefined) await tx.query(`update profiles set all_clocks_viewer = $2 where id = $1`, [p.id, p.all_clocks_viewer]);
-      if (p.global_role !== undefined) await tx.query(`update profiles set global_role = $2 where id = $1`, [p.id, p.global_role]);
-      await tx.query(
-        `insert into audit_log (actor_id, entity, entity_id, action, diff) values ($1, 'profiles', $2, 'update', $3)`,
-        [s.profile.id, p.id, JSON.stringify(p)],
+      if (p.is_active !== undefined) await tx.exec(`update ${S}.profiles set is_active = $2, updated_at = sysdatetimeoffset() where id = $1`, [p.id, p.is_active]);
+      if (p.all_clocks_viewer !== undefined) await tx.exec(`update ${S}.profiles set all_clocks_viewer = $2, updated_at = sysdatetimeoffset() where id = $1`, [p.id, p.all_clocks_viewer]);
+      if (p.global_role !== undefined) await tx.exec(`update ${S}.profiles set global_role = $2, updated_at = sysdatetimeoffset() where id = $1`, [p.id, p.global_role]);
+      await tx.exec(
+        `insert into ${S}.audit_log (actor_id, entity, entity_id, action, diff) values ($1, N'profiles', $2, N'update', $3)`,
+        [s.profile.id, p.id, { before: null, after: p }],
       );
     });
     if (p.is_active === false || p.all_clocks_viewer === false) syncCalendarLinksWhere({ userId: p.id });
@@ -73,10 +74,10 @@ export async function inviteUser(raw: unknown): Promise<Result> {
     const p = inviteInput.parse(raw);
     const { id } = await ensureIdentity(p.email);
     await withService((tx) =>
-      tx.query(
-        `insert into profiles (id, email, full_name, all_clocks_viewer) values ($1, $2, $3, $4)
-         on conflict (id) do update set is_active = true, all_clocks_viewer = excluded.all_clocks_viewer,
-           full_name = coalesce(excluded.full_name, profiles.full_name)`,
+      tx.exec(
+        `update ${S}.profiles with (updlock, holdlock) set is_active = 1, all_clocks_viewer = $4,
+           full_name = coalesce($3, full_name), updated_at = sysdatetimeoffset() where id = $1;
+         if @@rowcount = 0 insert into ${S}.profiles (id, email, full_name, all_clocks_viewer) values ($1, $2, $3, $4);`,
         [id, p.email, p.full_name || null, p.all_clocks_viewer],
       ),
     );
@@ -109,17 +110,18 @@ export async function createClock(raw: unknown): Promise<Result> {
     const p = clockInput.parse(raw);
     // As the super admin (RLS permits) so the audit log records the actor.
     await withUser(s.profile.id, async (tx) => {
-      const c = await tx.one<{ id: string }>(
-        `insert into clocks (name, slug, color, description, position) values ($1, $2, $3, $4,
-           coalesce((select max(position) + 1 from clocks), 0)) returning id`,
-        [p.name, p.slug, p.color, p.description || null],
+      const c = { id: randomUUID() };
+      await tx.exec(
+        `insert into ${S}.clocks (id, name, slug, color, description, position) values ($5, $1, $2, $3, $4,
+           coalesce((select max(position) + 1 from ${S}.clocks), 0))`,
+        [p.name, p.slug, p.color, p.description || null, c.id],
       );
       const rings = p.rings.length ? p.rings : ["Regulatory", "Internal", "Reporting"];
       const palette = ["#16A082", "#39978F", "#55BFB6", "#425B76", "#1CC0A7"];
       for (const [i, name] of rings.entries()) {
-        await tx.query(`insert into rings (clock_id, name, color, position) values ($1, $2, $3, $4)`, [c!.id, name, palette[i % palette.length], i]);
+        await tx.exec(`insert into ${S}.rings (clock_id, name, color, position) values ($1, $2, $3, $4)`, [c.id, name, palette[i % palette.length], i]);
       }
-      await tx.query(`insert into clock_members (clock_id, user_id, role) values ($1, $2, 'admin')`, [c!.id, s.profile.id]);
+      await tx.exec(`insert into ${S}.clock_members (clock_id, user_id, role) values ($1, $2, N'admin')`, [c.id, s.profile.id]);
     });
     revalidatePath("/", "layout");
     return { ok: true, message: `Created ${p.name}. You are its first admin.` };
@@ -132,7 +134,7 @@ export async function setClockArchived(raw: unknown): Promise<Result> {
   try {
     const s = await requireSuperAdmin();
     const p = z.object({ id: uuid, archived: z.boolean() }).parse(raw);
-    await withUser(s.profile.id, (tx) => tx.query(`update clocks set archived_at = case when $2 then now() end where id = $1`, [p.id, p.archived]));
+    await withUser(s.profile.id, (tx) => tx.exec(`update ${S}.clocks set archived_at = case when $2 = 1 then sysdatetimeoffset() end, updated_at = sysdatetimeoffset() where id = $1`, [p.id, p.archived]));
     if (p.archived) syncCalendarLinksWhere({ clockId: p.id });
     revalidatePath("/", "layout");
     return { ok: true, message: p.archived ? "Archived." : "Restored." };

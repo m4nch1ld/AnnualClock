@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { S, withUser } from "@/lib/db";
 import { Badge, Card } from "@/components/ui/card";
 import { ClockAdminRow, CreateClockForm, InviteUserForm, JobButtons, UserRow } from "./forms";
 
@@ -22,17 +22,18 @@ export default async function AdminPage() {
       clocks: string | null;
     }>(
       `select p.id, p.email, p.full_name, p.global_role, p.all_clocks_viewer, p.is_active, p.is_demo,
-         (select string_agg(c.name || ' (' || m.role || ')', ', ' order by c.position) from clock_members m join clocks c on c.id = m.clock_id where m.user_id = p.id) as clocks
-       from profiles p order by p.is_active desc, coalesce(p.full_name, p.email)`,
+         (select string_agg(c.name + N' (' + m.role + N')', N', ') within group (order by c.position)
+          from ${S}.clock_members m join ${S}.clocks c on c.id = m.clock_id where m.user_id = p.id) as clocks
+       from ${S}.profiles p order by p.is_active desc, coalesce(p.full_name, p.email)`,
     );
     const clocks = await tx.query<{ id: string; name: string; slug: string; color: string; archived_at: string | null; members: number; activities: number }>(
       `select c.id, c.name, c.slug, c.color, c.archived_at,
-         (select count(*)::int from clock_members m where m.clock_id = c.id) as members,
-         (select count(*)::int from activities a where a.clock_id = c.id and a.deleted_at is null) as activities
-       from clocks c order by c.archived_at nulls first, c.position, c.name`,
+         (select count(*) from ${S}.clock_members m where m.clock_id = c.id) as members,
+         (select count(*) from ${S}.activities a where a.clock_id = c.id and a.deleted_at is null) as activities
+       from ${S}.clocks c order by case when c.archived_at is null then 0 else 1 end, c.position, c.name`,
     );
     const runs = await tx.query<{ id: string; status: string; dry_run: boolean; started_at: string; finished_at: string | null; window_start: string | null; window_end: string | null; stats: Record<string, number>; error: string | null }>(
-      `select id, status, dry_run, started_at, finished_at, window_start, window_end, stats, error from job_runs order by started_at desc limit 15`,
+      `select top (15) id, status, dry_run, started_at, finished_at, window_start, window_end, stats, error from ${S}.job_runs order by started_at desc`,
     );
     return { users, clocks, runs };
   });

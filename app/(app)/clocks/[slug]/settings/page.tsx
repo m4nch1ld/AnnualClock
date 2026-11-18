@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireSession, roleIn } from "@/lib/server/session";
-import { withService, withUser } from "@/lib/db";
+import { S, withService, withUser } from "@/lib/db";
 import { getClockBySlug, getRings, listMembers } from "@/lib/data/clocks";
 import { Card } from "@/components/ui/card";
 import { GeneralForm, RingsEditor, MembersEditor, NotificationSettingsForm, ImportForm } from "./forms";
@@ -19,22 +19,23 @@ export default async function ClockSettingsPage({ params }: { params: Promise<{ 
     const rings = await getRings(tx, [clock.id]);
     const members = await listMembers(tx, clock.id);
     const log = await tx.query<{ id: string; reminder_key: string; channel: string; status: string; error: string | null; created_at: string; title: string | null; recipient: string | null; occurrence_date: string | null }>(
-      `select l.id, l.reminder_key, l.channel, l.status, l.error, l.created_at, a.title, coalesce(p.full_name, p.email) as recipient, l.occurrence_date
-       from notification_log l left join activities a on a.id = l.activity_id left join profiles p on p.id = l.recipient_id
-       where l.clock_id = $1 order by l.created_at desc limit 50`,
+      `select top (50) l.id, l.reminder_key, l.channel, l.status, l.error, l.created_at, a.title, coalesce(p.full_name, p.email) as recipient, l.occurrence_date
+       from ${S}.notification_log l left join ${S}.activities a on a.id = l.activity_id left join ${S}.profiles p on p.id = l.recipient_id
+       where l.clock_id = $1 order by l.created_at desc`,
       [clock.id],
     );
     const audit = await tx.query<{ id: number; entity: string; action: string; created_at: string; actor: string | null; title: string | null }>(
-      `select l.id, l.entity, l.action, l.created_at, coalesce(p.full_name, p.email) as actor,
-         coalesce(l.diff ->> 'title', (l.diff -> 'title' ->> 'to'), (l.diff ->> 'name'), a.title) as title
-       from audit_log l left join profiles p on p.id = l.actor_id left join activities a on a.id = l.entity_id
-       where l.clock_id = $1 order by l.created_at desc limit 50`,
+      `select top (50) l.id, l.entity, l.action, l.created_at, coalesce(p.full_name, p.email) as actor,
+         coalesce(json_value(l.diff, '$.after.title'), json_value(l.diff, '$.before.title'), json_value(l.diff, '$.after.name'),
+                  json_value(l.diff, '$.before.name'), a.title) as title
+       from ${S}.audit_log l left join ${S}.profiles p on p.id = l.actor_id left join ${S}.activities a on a.id = l.entity_id
+       where l.clock_id = $1 order by l.created_at desc`,
       [clock.id],
     );
     return { rings, members, log, audit };
   });
   const hasWebhook = await withService((tx) =>
-    tx.one<{ ok: boolean }>(`select coalesce(teams_webhook_url, '') <> '' as ok from clock_secrets where clock_id = $1`, [clock.id]),
+    tx.one<{ ok: boolean }>(`select cast(case when coalesce(teams_webhook_url, N'') <> N'' then 1 else 0 end as bit) as ok from ${S}.clock_secrets where clock_id = $1`, [clock.id]),
   );
 
   const fmt = (s: string) => new Date(s).toLocaleString("en-GB", { timeZone: "Europe/Helsinki" });

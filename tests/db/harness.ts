@@ -1,34 +1,38 @@
-import { PGlite } from "@electric-sql/pglite";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-
 /**
- * Boots an in-process Postgres (PGlite), applies supabase/bootstrap/plain-postgres.sql
- * (the same bootstrap used on Azure) and every migration in supabase/migrations.
- * Lets RLS tests run without Docker or a hosted project.
+ * SQL Server test harness. Needs a real SQL Server 2022+ / Azure SQL:
+ *   TEST_DATABASE_URL="Server=localhost,1433;Database=master;User Id=sa;Password=...;Encrypt=true;TrustServerCertificate=true"
+ * CI starts one as a service container (.github/workflows/ci.yml). Without TEST_DATABASE_URL
+ * the database suites are skipped (in-process substitutes cannot prove SQL Server RLS).
+ *
+ * Each run creates a throwaway database, applies database/migrations with the real runner,
+ * and points lib/db at it — so tests exercise exactly the code path the app uses.
  */
-export async function createTestDb() {
-  const db = new PGlite();
-  // Same bootstrap the Azure / plain-Postgres deployment uses (roles, auth.uid(), default grants).
-  await db.exec(readFileSync(join(process.cwd(), "supabase", "bootstrap", "plain-postgres.sql"), "utf8"));
-  // Test-only: the service role bypasses RLS like Supabase's.
-  await db.exec("alter role service_role bypassrls");
-  const dir = join(process.cwd(), "supabase", "migrations");
-  for (const file of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) {
-    await db.exec(readFileSync(join(dir, file), "utf8"));
-  }
-  return db;
+import sql from "mssql";
+
+export const TEST_URL = process.env.TEST_DATABASE_URL;
+export const hasTestDb = !!TEST_URL;
+
+let dbName: string | undefined;
+
+export async function setupTestDb() {
+  if (!TEST_URL) throw new Error("TEST_DATABASE_URL not set");
+  dbName = `annual_clock_test_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const master = await new sql.ConnectionPool(TEST_URL).connect();
+  await master.request().batch(`CREATE DATABASE [${dbName}]`);
+  await master.close();
+  const url = /Database=[^;]*/i.test(TEST_URL) ? TEST_URL.replace(/Database=[^;]*/i, `Database=${dbName}`) : `${TEST_URL};Database=${dbName}`;
+  process.env.DATABASE_URL = url;
+  delete process.env.DATABASE_SCHEMA; // default schema: annual_clock
+  const { migrate } = await import("../../scripts/migrate");
+  await migrate(url, () => {});
+  return await import("../../lib/db");
 }
 
-/** Run `fn` as the given user (or anon when userId is null) inside a transaction. */
-export async function asUser<T>(
-  db: PGlite,
-  userId: string | null,
-  fn: (q: <R = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<R[]>) => Promise<T>,
-): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.exec(`set local role ${userId ? "authenticated" : "anon"}`);
-    if (userId) await tx.query(`select set_config('request.jwt.claim.sub', $1, true)`, [userId]);
-    return fn(async (sql, params) => (await tx.query(sql, params)).rows as never);
-  });
+export async function teardownTestDb() {
+  const db = await import("../../lib/db");
+  await db.closePool();
+  if (!TEST_URL || !dbName) return;
+  const master = await new sql.ConnectionPool(TEST_URL).connect();
+  await master.request().batch(`ALTER DATABASE [${dbName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [${dbName}];`);
+  await master.close();
 }

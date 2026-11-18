@@ -24,8 +24,8 @@ RUN addgroup -S app && adduser -S app -G app
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
-# plain SQL migrations, for a psql-based migration job if you do not run `npm run db:migrate` from CI
-COPY --from=build /app/supabase ./supabase
+# T-SQL migrations (database/migrations), e.g. for a one-off migration job
+COPY --from=build /app/database ./database
 USER app
 EXPOSE 3000
 CMD ["node", "server.js"]

@@ -35,11 +35,11 @@ export function syncCalendarAfter(change: CalendarChange | null) {
 export function syncCalendarLinksWhere(filter: { userId?: string; clockId?: string }) {
   after(async () => {
     try {
-      const { withService } = await import("@/lib/db");
+      const { S, withService } = await import("@/lib/db");
       const ids = await withService((tx) =>
         tx.query<{ activity_id: string }>(
-          `select distinct l.activity_id from calendar_links l join activities a on a.id = l.activity_id
-           where l.status = 'active' and ($1::uuid is null or l.user_id = $1) and ($2::uuid is null or a.clock_id = $2)`,
+          `select distinct l.activity_id from ${S}.calendar_links l join ${S}.activities a on a.id = l.activity_id
+           where l.status = N'active' and ($1 is null or l.user_id = $1) and ($2 is null or a.clock_id = $2)`,
           [filter.userId ?? null, filter.clockId ?? null],
         ),
       );

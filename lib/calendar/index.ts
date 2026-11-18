@@ -11,7 +11,7 @@ import { getEmailProvider } from "../providers/email";
 import { GraphCalendarProvider, type GraphTokenSource } from "./graph";
 import { IcsInviteProvider } from "./ics-invite";
 import { EmailProviderInviteMailer, SmtpInviteMailer } from "./mailers";
-import { createPgCalendarRepository } from "./pg-repository";
+import { createSqlCalendarRepository } from "./sql-repository";
 import { addLink, removeLink, retryFailed, syncActivity, type CalendarDeps } from "./sync";
 import type { CalendarProvider } from "./types";
 
@@ -50,7 +50,7 @@ export function defaultCalendarDeps(): CalendarDeps {
   if (!deps) {
     const from = process.env.EMAIL_FROM ?? "ESL Annual Clock <onboarding@resend.dev>";
     deps = {
-      repo: createPgCalendarRepository(),
+      repo: createSqlCalendarRepository(),
       provider: createProvider(),
       baseUrl: process.env.APP_BASE_URL ?? "http://localhost:3000",
       organizer: { email: process.env.CALENDAR_ORGANIZER_EMAIL ?? addressOf(from), name: "ESL Annual Clock" },

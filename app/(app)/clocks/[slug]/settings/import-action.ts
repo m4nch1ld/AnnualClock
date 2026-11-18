@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { randomUUID } from "node:crypto";
+import { S, withUser } from "@/lib/db";
 import { getActivities, getRings } from "@/lib/data/clocks";
 import { csvToRecords, parseIcsEvents } from "@/lib/import-export";
 import { activityInput, uuid } from "@/lib/validation";
@@ -24,12 +25,15 @@ export async function importActivities(form: FormData): Promise<Result> {
 
   try {
     return await withUser(uid, async (tx) => {
-      const can = await tx.one<{ ok: boolean }>(`select app.can_edit_clock($1) as ok`, [clockId.data]);
+      const can = await tx.one<{ ok: boolean }>(
+        `select cast(case when exists (select 1 from ${S}.rls_edit_clock($1)) then 1 else 0 end as bit) as ok`,
+        [clockId.data],
+      );
       if (!can?.ok) return { ok: false, error: "You need editor rights in this clock." } as const;
       const rings = await getRings(tx, [clockId.data]);
       if (!rings.length) return { ok: false, error: "Create a ring first." } as const;
       const members = await tx.query<{ id: string; email: string }>(
-        `select p.id, lower(p.email) as email from clock_members m join profiles p on p.id = m.user_id where m.clock_id = $1`,
+        `select p.id, lower(p.email) as email from ${S}.clock_members m join ${S}.profiles p on p.id = m.user_id where m.clock_id = $1`,
         [clockId.data],
       );
       const idByEmail = new Map(members.map((m) => [m.email, m.id]));
@@ -85,22 +89,27 @@ export async function importActivities(form: FormData): Promise<Result> {
           continue;
         }
         const a = parsed.data;
-        const row = await tx.one<{ id: string }>(
-          `insert into activities (clock_id, ring_id, title, description, type, start_date, end_date, all_day, start_time, end_time,
+        const row = { id: randomUUID() };
+        await tx.exec(
+          `insert into ${S}.activities (id, clock_id, ring_id, title, description, type, start_date, end_date, all_day, start_time, end_time,
              rrule, owner_id, status, reminder_offsets, tags, links, created_by, updated_by)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17) returning id`,
-          [a.clock_id, a.ring_id, a.title, a.description, a.type, a.start_date, a.end_date, a.all_day, a.start_time, a.end_time, a.rrule, a.owner_id, a.status, a.reminder_offsets, a.tags, JSON.stringify(a.links), uid],
+           values ($18,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)`,
+          [a.clock_id, a.ring_id, a.title, a.description, a.type, a.start_date, a.end_date, a.all_day, a.start_time, a.end_time, a.rrule, a.owner_id, a.status, a.reminder_offsets, a.tags, JSON.stringify(a.links), uid, row.id],
         );
         for (const as of a.assignee_ids) {
-          await tx.query(`insert into activity_assignees (activity_id, user_id) values ($1, $2) on conflict do nothing`, [row!.id, as]);
+          await tx.exec(
+            `if not exists (select 1 from ${S}.activity_assignees where activity_id = $1 and user_id = $2)
+               insert into ${S}.activity_assignees (activity_id, clock_id, user_id) values ($1, $3, $2)`,
+            [row.id, as, a.clock_id],
+          );
         }
-        titleToId.set(a.title.toLowerCase(), row!.id);
-        if (rec.predecessor_title) pendingPredecessors.push({ id: row!.id, title: rec.predecessor_title });
+        titleToId.set(a.title.toLowerCase(), row.id);
+        if (rec.predecessor_title) pendingPredecessors.push({ id: row.id, title: rec.predecessor_title });
         imported++;
       }
       for (const p of pendingPredecessors) {
         const pred = titleToId.get(p.title.toLowerCase());
-        if (pred && pred !== p.id) await tx.query(`update activities set predecessor_id = $2 where id = $1`, [p.id, pred]);
+        if (pred && pred !== p.id) await tx.exec(`update ${S}.activities set predecessor_id = $2, updated_at = sysdatetimeoffset() where id = $1`, [p.id, pred]);
       }
       revalidatePath("/clocks", "layout");
       if (!imported && errors.length) return { ok: false, error: `Nothing imported. ${errors.slice(0, 5).join(" · ")}` } as const;
