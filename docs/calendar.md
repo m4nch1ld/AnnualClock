@@ -34,7 +34,7 @@ scheduler ──► calendar.retryFailed()                       (app/api/cron/n
                      │
                      ▼
         lib/calendar/sync.ts   (pure logic: build event, content hash, create/update/cancel decisions)
-          ├─ CalendarRepository → lib/calendar/pg-repository.ts  (table calendar_links)
+          ├─ CalendarRepository → lib/calendar/sql-repository.ts  (table calendar_links)
           └─ CalendarProvider
                ├─ IcsInviteProvider (lib/calendar/ics-invite.ts)  ← prototype default
                │     └─ InviteMailer: SmtpInviteMailer (nodemailer, proper text/calendar part)
@@ -42,7 +42,7 @@ scheduler ──► calendar.retryFailed()                       (app/api/cron/n
                └─ GraphCalendarProvider (lib/calendar/graph.ts)    ← Azure target, not wired yet
 ```
 
-Table `calendar_links` (migration `20261012000005`): one active row per user + activity
+Table `calendar_links` (`database/migrations/0001_schema.sql`): one active row per user + activity
 (+ occurrence). Stores the iCalendar `uid`, `sequence`, `content_hash`, Graph `external_id`,
 `last_error`. RLS: users can read their own rows; all writes are server-side.
 

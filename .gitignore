@@ -14,3 +14,6 @@ supabase/.temp/
 .DS_Store
 .next-build/
 .next-ci/
+
+# Old local PGlite database (no longer used)
+.local-db/

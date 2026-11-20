@@ -1,5 +1,5 @@
 import { requireSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { S, withUser } from "@/lib/db";
 import { Card } from "@/components/ui/card";
 import { ProfileForm, PrefsForm, IcsFeeds } from "./forms";
 
@@ -10,14 +10,14 @@ export default async function SettingsPage() {
   const uid = session.profile.id;
   const { prefs, feeds, clocks } = await withUser(uid, async (tx) => {
     const prefs = await tx.query<{ clock_id: string; enabled: boolean; channels: string[]; subscribe_all: boolean; delivery: "individual" | "digest" }>(
-      `select clock_id, enabled, channels, subscribe_all, delivery from notification_prefs where user_id = $1`,
+      `select clock_id, enabled, channels, subscribe_all, delivery from ${S}.notification_prefs where user_id = $1`,
       [uid],
     );
     const feeds = await tx.query<{ id: string; clock_id: string | null; label: string | null; created_at: string; last_used_at: string | null; revoked_at: string | null }>(
-      `select id, clock_id, label, created_at, last_used_at, revoked_at from ics_tokens where user_id = $1 order by created_at desc`,
+      `select id, clock_id, label, created_at, last_used_at, revoked_at from ${S}.ics_tokens where user_id = $1 order by created_at desc`,
       [uid],
     );
-    const clocks = await tx.query<{ id: string; name: string }>(`select id, name from clocks where archived_at is null order by position, name`);
+    const clocks = await tx.query<{ id: string; name: string }>(`select id, name from ${S}.clocks where archived_at is null order by position, name`);
     return { prefs, feeds, clocks };
   });
 

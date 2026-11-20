@@ -1,7 +1,7 @@
 "use server";
 
 import { requireSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { S, withUser } from "@/lib/db";
 import { uuid } from "@/lib/validation";
 
 export interface InAppItem {
@@ -19,7 +19,7 @@ export async function listInApp(limit = 10): Promise<InAppItem[]> {
   const n = Math.min(100, Math.max(1, Math.floor(limit)));
   return withUser(s.profile.id, (tx) =>
     tx.query<InAppItem>(
-      `select id, kind, title, body, link, read_at, created_at from in_app_notifications order by created_at desc limit $1`,
+      `select top ($1) id, kind, title, body, link, read_at, created_at from ${S}.in_app_notifications order by created_at desc`,
       [n],
     ),
   );
@@ -29,7 +29,7 @@ export async function markRead(id?: string): Promise<void> {
   const s = await requireSession();
   await withUser(s.profile.id, (tx) =>
     id
-      ? tx.query(`update in_app_notifications set read_at = now() where id = $1 and read_at is null`, [uuid.parse(id)])
-      : tx.query(`update in_app_notifications set read_at = now() where read_at is null`),
+      ? tx.exec(`update ${S}.in_app_notifications set read_at = sysdatetimeoffset() where id = $1 and read_at is null`, [uuid.parse(id)])
+      : tx.exec(`update ${S}.in_app_notifications set read_at = sysdatetimeoffset() where read_at is null`),
   );
 }

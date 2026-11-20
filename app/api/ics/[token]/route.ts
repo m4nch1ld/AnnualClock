@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { hashToken } from "@/lib/tokens";
-import { withService, withUser } from "@/lib/db";
+import { S, withService, withUser } from "@/lib/db";
 import { getActivities, getOccurrenceStates, getRings, listClocks } from "@/lib/data/clocks";
 import { buildOccurrences } from "@/lib/domain";
 import { addDays, todayInZone } from "@/lib/dates";
@@ -26,9 +26,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ toke
 
   const row = await withService((tx) =>
     tx.one<{ id: string; user_id: string; clock_id: string | null; is_active: boolean }>(
-      `update ics_tokens t set last_used_at = now() from profiles p
-       where t.token_hash = $1 and t.revoked_at is null and p.id = t.user_id
-       returning t.id, t.user_id, t.clock_id, p.is_active`,
+      `update ${S}.ics_tokens set last_used_at = sysdatetimeoffset() where token_hash = $1 and revoked_at is null;
+       select t.id, t.user_id, t.clock_id, p.is_active from ${S}.ics_tokens t join ${S}.profiles p on p.id = t.user_id
+       where t.token_hash = $1 and t.revoked_at is null`,
       [hashToken(token)],
     ),
   );

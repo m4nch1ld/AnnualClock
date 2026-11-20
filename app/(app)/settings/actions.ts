@@ -3,7 +3,7 @@
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
 import { requireSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { S, withUser } from "@/lib/db";
 import { createOpaqueToken } from "@/lib/tokens";
 import { env } from "@/lib/env";
 import { uuid } from "@/lib/validation";
@@ -17,7 +17,7 @@ export async function updateProfile(raw: unknown) {
   const s = await requireSession();
   const p = profileInput.parse(raw);
   await withUser(s.profile.id, (tx) =>
-    tx.query(`update profiles set full_name = $2, weekly_digest = $3 where id = $1`, [s.profile.id, p.full_name, p.weekly_digest]),
+    tx.exec(`update ${S}.profiles set full_name = $2, weekly_digest = $3, updated_at = sysdatetimeoffset() where id = $1`, [s.profile.id, p.full_name, p.weekly_digest]),
   );
   revalidatePath("/settings");
   return { ok: true as const };
@@ -35,11 +35,11 @@ export async function savePrefs(raw: unknown) {
   const s = await requireSession();
   const p = prefsInput.parse(raw);
   await withUser(s.profile.id, (tx) =>
-    tx.query(
-      `insert into notification_prefs (user_id, clock_id, enabled, channels, subscribe_all, delivery)
-       values ($1, $2, $3, $4, $5, $6)
-       on conflict (user_id, clock_id) do update set enabled = excluded.enabled, channels = excluded.channels,
-         subscribe_all = excluded.subscribe_all, delivery = excluded.delivery`,
+    tx.exec(
+      `update ${S}.notification_prefs with (updlock, holdlock) set enabled = $3, channels = $4, subscribe_all = $5, delivery = $6,
+         updated_at = sysdatetimeoffset() where user_id = $1 and clock_id = $2;
+       if @@rowcount = 0
+         insert into ${S}.notification_prefs (user_id, clock_id, enabled, channels, subscribe_all, delivery) values ($1, $2, $3, $4, $5, $6);`,
       [s.profile.id, p.clock_id, p.enabled, [...new Set(p.channels)], p.subscribe_all, p.delivery],
     ),
   );
@@ -53,7 +53,7 @@ export async function createIcsFeed(clockId: string | null) {
   const cid = clockId ? uuid.parse(clockId) : null;
   const { token, hash } = createOpaqueToken();
   await withUser(s.profile.id, (tx) =>
-    tx.query(`insert into ics_tokens (user_id, clock_id, token_hash, label) values ($1, $2, $3, $4)`, [
+    tx.exec(`insert into ${S}.ics_tokens (user_id, clock_id, token_hash, label) values ($1, $2, $3, $4)`, [
       s.profile.id,
       cid,
       hash,
@@ -66,7 +66,7 @@ export async function createIcsFeed(clockId: string | null) {
 
 export async function revokeIcsFeed(id: string) {
   const s = await requireSession();
-  await withUser(s.profile.id, (tx) => tx.query(`update ics_tokens set revoked_at = now() where id = $1`, [uuid.parse(id)]));
+  await withUser(s.profile.id, (tx) => tx.exec(`update ${S}.ics_tokens set revoked_at = sysdatetimeoffset(), updated_at = sysdatetimeoffset() where id = $1`, [uuid.parse(id)]));
   revalidatePath("/settings");
   return { ok: true as const };
 }

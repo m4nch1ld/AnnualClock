@@ -1,6 +1,6 @@
 import "server-only";
-import { withUser } from "@/lib/db";
-import { getActivities, getOccurrenceStates, getRings, listPeople } from "@/lib/data/clocks";
+import { S, withUser } from "@/lib/db";
+import { getActivities, getOccurrenceStates, getRings, inJson, listPeople } from "@/lib/data/clocks";
 import { makeDate, todayInZone } from "@/lib/dates";
 import type { Clock } from "@/lib/domain";
 import type { WorkspaceData } from "@/components/clock/types";
@@ -27,7 +27,7 @@ export async function loadWorkspace(
     const activities = await getActivities(tx, clockIds);
     const people = await listPeople(tx);
     const members = await tx.query<{ clock_id: string; user_id: string }>(
-      `select clock_id, user_id from clock_members where clock_id = any($1)`,
+      `select clock_id, user_id from ${S}.clock_members where clock_id in ${inJson("$1")}`,
       [clockIds],
     );
     // States for occurrences that can overlap the year (periods may start in the previous year).
@@ -38,7 +38,8 @@ export async function loadWorkspace(
       makeDate(year, 12, 31),
     );
     const calendarLinks = await tx.query<WorkspaceData["calendarLinks"][number]>(
-      `select activity_id, scope, occurrence_date, (last_error is not null) as pending from calendar_links where user_id = $1 and status = 'active' and activity_id = any($2)`,
+      `select activity_id, scope, occurrence_date, cast(case when last_error is not null then 1 else 0 end as bit) as pending
+       from ${S}.calendar_links where user_id = $1 and status = N'active' and activity_id in ${inJson("$2")}`,
       [uid, activities.map((a) => a.id)],
     );
     const memberIds: Record<string, string[]> = {};

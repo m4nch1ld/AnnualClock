@@ -6,8 +6,9 @@
  */
 import { z } from "zod";
 import { requireSession } from "@/lib/server/session";
-import { withUser, type Tx } from "@/lib/db";
-import { getActivity } from "@/lib/data/clocks";
+import { randomUUID } from "node:crypto";
+import { S, withUser, type Tx } from "@/lib/db";
+import { getActivity, inJson } from "@/lib/data/clocks";
 import { addDays, diffDays } from "@/lib/dates";
 import { endSeriesBefore } from "@/lib/recurrence";
 import { activityInput, moveInput, occurrenceStatusInput, snoozeInput, uuid } from "@/lib/validation";
@@ -35,16 +36,21 @@ function fail(e: unknown): ActionResult {
 async function assertMembers(tx: Tx, clockId: string, ids: string[]) {
   if (!ids.length) return;
   const rows = await tx.query<{ user_id: string }>(
-    `select user_id from clock_members where clock_id = $1 and user_id = any($2)`,
+    `select user_id from ${S}.clock_members where clock_id = $1 and user_id in ${inJson("$2")}`,
     [clockId, ids],
   );
   if (rows.length !== new Set(ids).size) throw new z.ZodError([{ code: "custom", path: ["owner_id"], message: "Owner and assignees must be members of the clock", input: ids }]);
 }
 
 async function setAssignees(tx: Tx, activityId: string, ids: string[]) {
-  await tx.query(`delete from activity_assignees where activity_id = $1 and not (user_id = any($2))`, [activityId, ids]);
+  await tx.exec(`delete from ${S}.activity_assignees where activity_id = $1 and user_id not in ${inJson("$2")}`, [activityId, ids]);
   for (const id of new Set(ids)) {
-    await tx.query(`insert into activity_assignees (activity_id, user_id) values ($1, $2) on conflict do nothing`, [activityId, id]);
+    await tx.exec(
+      `insert into ${S}.activity_assignees (activity_id, clock_id, user_id)
+       select a.id, a.clock_id, $2 from ${S}.activities a
+       where a.id = $1 and not exists (select 1 from ${S}.activity_assignees x where x.activity_id = $1 and x.user_id = $2)`,
+      [activityId, id],
+    );
   }
 }
 
@@ -68,30 +74,31 @@ type Fields = {
 };
 
 async function insertActivity(tx: Tx, clockId: string, f: Fields, uid: string, seriesParent: string | null = null) {
-  const row = await tx.one<{ id: string }>(
-    `insert into activities (clock_id, ring_id, title, description, type, start_date, end_date, all_day, start_time, end_time,
+  const id = randomUUID();
+  await tx.exec(
+    `insert into ${S}.activities (id, clock_id, ring_id, title, description, type, start_date, end_date, all_day, start_time, end_time,
        rrule, owner_id, status, predecessor_id, reminder_offsets, tags, links, series_parent_id, created_by, updated_by)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19) returning id`,
+     values ($20,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19)`,
     [
       clockId, f.ring_id, f.title, f.description, f.type, f.start_date, f.end_date, f.all_day, f.start_time, f.end_time,
-      f.rrule, f.owner_id, f.status, f.predecessor_id, f.reminder_offsets, f.tags, JSON.stringify(f.links), seriesParent, uid,
+      f.rrule, f.owner_id, f.status, f.predecessor_id, f.reminder_offsets, f.tags, JSON.stringify(f.links), seriesParent, uid, id,
     ],
   );
-  return row!.id;
+  return id;
 }
 
 async function updateActivity(tx: Tx, id: string, f: Fields, uid: string) {
-  const rows = await tx.query(
-    `update activities set ring_id=$2, title=$3, description=$4, type=$5, start_date=$6, end_date=$7, all_day=$8,
+  const n = await tx.exec(
+    `update ${S}.activities set ring_id=$2, title=$3, description=$4, type=$5, start_date=$6, end_date=$7, all_day=$8,
        start_time=$9, end_time=$10, rrule=$11, owner_id=$12, status=$13, predecessor_id=$14, reminder_offsets=$15,
-       tags=$16, links=$17, updated_by=$18
-     where id = $1 and deleted_at is null returning id`,
+       tags=$16, links=$17, updated_by=$18, updated_at=sysdatetimeoffset()
+     where id = $1 and deleted_at is null`,
     [
       id, f.ring_id, f.title, f.description, f.type, f.start_date, f.end_date, f.all_day, f.start_time, f.end_time,
       f.rrule, f.owner_id, f.status, f.predecessor_id, f.reminder_offsets, f.tags, JSON.stringify(f.links), uid,
     ],
   );
-  if (!rows.length) throw Object.assign(new Error("row-level security: not updatable"), { code: "42501" });
+  if (!n) throw Object.assign(new Error("row-level security: not updatable"), { code: "42501" });
 }
 
 /**
@@ -99,19 +106,20 @@ async function updateActivity(tx: Tx, id: string, f: Fields, uid: string) {
  * new series (with `fields`) continues. Future per-occurrence state moves along.
  */
 async function splitSeries(tx: Tx, existing: Activity, fromDate: string, fields: Fields, assignees: string[], uid: string) {
-  await tx.query(`update activities set rrule = $2, updated_by = $3 where id = $1`, [
+  await tx.exec(`update ${S}.activities set rrule = $2, updated_by = $3, updated_at = sysdatetimeoffset() where id = $1`, [
     existing.id,
     endSeriesBefore(existing.rrule!, fromDate),
     uid,
   ]);
   const newId = await insertActivity(tx, existing.clock_id, fields, uid, existing.id);
   await setAssignees(tx, newId, assignees);
-  await tx.query(
-    `update activity_occurrences_state set activity_id = $2, updated_by = $3 where activity_id = $1 and occurrence_date >= $4`,
+  await tx.exec(
+    `update ${S}.activity_occurrences_state set activity_id = $2, updated_by = $3, updated_at = sysdatetimeoffset()
+     where activity_id = $1 and occurrence_date >= $4`,
     [existing.id, newId, uid, fromDate],
   );
   // successors of the old series now follow the new one
-  await tx.query(`update activities set predecessor_id = $2, updated_by = $3 where predecessor_id = $1 and clock_id = $4`, [
+  await tx.exec(`update ${S}.activities set predecessor_id = $2, updated_by = $3, updated_at = sysdatetimeoffset() where predecessor_id = $1 and clock_id = $4`, [
     existing.id,
     newId,
     uid,
@@ -200,11 +208,12 @@ export async function moveActivity(raw: unknown): Promise<ActionResult> {
       }
       const start = existing.rrule ? addDays(existing.start_date, diffDays(m.occurrence_date, m.new_start)) : m.new_start;
       const end = duration === null ? null : addDays(start, duration);
-      const rows = await tx.query(
-        `update activities set start_date = $2, end_date = $3, updated_by = $4 where id = $1 and deleted_at is null returning id`,
+      const n = await tx.exec(
+        `update ${S}.activities set start_date = $2, end_date = $3, updated_by = $4, updated_at = sysdatetimeoffset()
+         where id = $1 and deleted_at is null`,
         [m.activity_id, start, end, uid],
       );
-      if (!rows.length) return { ok: false, error: "You do not have permission to do that." } as const;
+      if (!n) return { ok: false, error: "You do not have permission to do that." } as const;
       const shift = diffDays(existing.start_date, start);
       change = { activityIds: [m.activity_id], ...(existing.rrule && shift ? { shift: { activityId: m.activity_id, days: shift } } : {}) };
       return { ok: true, id: m.activity_id } as const;
@@ -244,13 +253,14 @@ export async function deleteActivity(id: string): Promise<ActionResult> {
   try {
     const session = await requireSession();
     const aid = uuid.parse(id);
-    const rows = await withUser(session.profile.id, (tx) =>
-      tx.query(`update activities set deleted_at = now(), updated_by = $2 where id = $1 and deleted_at is null returning id`, [
-        aid,
-        session.profile.id,
-      ]),
+    const n = await withUser(session.profile.id, (tx) =>
+      tx.exec(
+        `update ${S}.activities set deleted_at = sysdatetimeoffset(), updated_by = $2, updated_at = sysdatetimeoffset()
+         where id = $1 and deleted_at is null`,
+        [aid, session.profile.id],
+      ),
     );
-    if (!rows.length) return { ok: false, error: "You do not have permission to do that." };
+    if (!n) return { ok: false, error: "You do not have permission to do that." };
     syncCalendarAfter({ activityIds: [aid] }); // sends cancellations
     return { ok: true };
   } catch (e) {
@@ -272,27 +282,39 @@ export async function getActivityHistory(id: string): Promise<HistoryEntry[]> {
   const session = await requireSession();
   const aid = uuid.parse(id);
   const rows = await withUser(session.profile.id, (tx) =>
-    tx.query<{ id: number; action: string; entity: string; actor: string | null; created_at: string; diff: Record<string, unknown> }>(
-      `select l.id, l.action, l.entity, coalesce(p.full_name, p.email) as actor, l.created_at::text, l.diff
-       from audit_log l left join profiles p on p.id = l.actor_id
-       where l.entity_id = $1 order by l.created_at desc, l.id desc limit 50`,
+    tx.query<{ id: number; action: string; entity: string; actor: string | null; created_at: string; diff: AuditDiff }>(
+      `select top (50) l.id, l.action, l.entity, coalesce(p.full_name, p.email) as actor, l.created_at, l.diff
+       from ${S}.audit_log l left join ${S}.profiles p on p.id = l.actor_id
+       where l.entity_id = $1 order by l.created_at desc, l.id desc`,
       [aid],
     ),
   );
-  const ignore = new Set(["updated_by", "updated_at", "created_at", "id", "created_by", "clock_id", "is_demo"]);
-  return rows.map((r) => {
-    const fields = r.action === "update" ? Object.keys(r.diff).filter((k) => !ignore.has(k)) : [];
-    let summary: string | null = null;
-    if (r.entity === "activity_occurrences_state") {
-      const d = r.diff as Record<string, unknown>;
-      const status = (d.status as { to?: string })?.to ?? (d.status as string | undefined);
-      const occ = (d.occurrence_date as string | undefined) ?? "";
-      const snooze = (d.snoozed_until as { to?: string })?.to ?? (d.snoozed_until as string | undefined);
-      summary = snooze ? `Snoozed until ${snooze}` : status ? `Occurrence ${occ} → ${status}`.trim() : null;
-    }
-    if (r.entity === "activity_assignees") summary = r.action === "insert" ? "Assignee added" : "Assignee removed";
-    return { id: r.id, action: r.action, entity: r.entity, actor: r.actor, created_at: r.created_at, fields, summary };
-  });
+  return rows.map(toHistoryEntry).filter((h): h is HistoryEntry => h !== null);
+}
+
+type AuditRow = Record<string, unknown>;
+type AuditDiff = { before?: AuditRow | null; after?: AuditRow | null };
+const IGNORED_FIELDS = new Set(["updated_by", "updated_at", "created_at", "id", "created_by", "clock_id", "is_demo", "completed_at", "completed_by"]);
+
+/** Turn an audit row ({before, after} snapshots) into a readable history entry; null for no-op updates. */
+function toHistoryEntry(r: { id: number; action: string; entity: string; actor: string | null; created_at: string; diff: AuditDiff }): HistoryEntry | null {
+  const before = r.diff?.before ?? {};
+  const after = r.diff?.after ?? {};
+  const changed = Object.keys({ ...before, ...after }).filter(
+    (k) => !IGNORED_FIELDS.has(k) && JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null),
+  );
+  let summary: string | null = null;
+  if (r.entity === "activity_occurrences_state") {
+    const occ = String(after.occurrence_date ?? before.occurrence_date ?? "");
+    if (changed.includes("snoozed_until") && after.snoozed_until) summary = `Snoozed until ${after.snoozed_until}`;
+    else if (changed.includes("status") || r.action === "insert") summary = `Occurrence ${occ} → ${after.status ?? before.status}`;
+    else if (r.action === "update") return null;
+  } else if (r.entity === "activity_assignees") {
+    summary = r.action === "insert" ? "Assignee added" : "Assignee removed";
+  } else if (r.action === "update" && changed.length === 0) {
+    return null;
+  }
+  return { id: r.id, action: r.action, entity: r.entity, actor: r.actor, created_at: r.created_at, fields: r.action === "update" ? changed : [], summary };
 }
 
 // ---------------------------------------------------------------------------

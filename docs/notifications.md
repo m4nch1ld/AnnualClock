@@ -6,10 +6,10 @@ a scheduled job; ICS feeds provide a pull-based safety net.
 ## Flow
 
 ```
-scheduler (Vercel Cron / Azure timer / pg_cron / CLI)
+scheduler (Container Apps Job / Azure Functions timer / Vercel Cron / CLI)
    └─> runNotificationJob(deps, { now })              lib/notifications/job.ts
          1. window = (end of last successful run − 1 h overlap, now]   (capped at 14 days)
-         2. data   = repository.loadPlannerData()                      pg-repository.ts
+         2. data   = repository.loadPlannerData()                      sql-repository.ts
          3. intents = planNotifications(data, window)                  planner.ts (pure)
          4. retry failed / stuck entries whose backoff has elapsed
          5. for each intent: claim (INSERT … ON CONFLICT DO NOTHING) → send via channel → mark sent/failed
@@ -33,7 +33,8 @@ escalations are sent **for that occurrence**; other occurrences of the series ar
 ## Guarantees
 
 - **Idempotent**: `notification_log` has a unique constraint on
-  `(activity_id, occurrence_date, reminder_key, recipient_id, channel)` (`NULLS NOT DISTINCT`).
+  `(activity_id, occurrence_date, reminder_key, recipient_id, channel)` (unique index `ux_nlog_idempotency`;
+  SQL Server treats NULLs as equal there, which covers clock-level channels without a recipient).
   A delivery is claimed before it is sent, so concurrent or repeated runs never send twice.
   Running the job twice in a row sends nothing the second time (tested).
 - **Tolerant**: a late or missed run catches up on everything since the last successful window.
@@ -49,22 +50,9 @@ escalations are sent **for that occurrence**; other occurrences of the series ar
 |---|---|---|
 | Vercel Hobby | daily | `vercel.json` (already configured, 05:00 UTC) |
 | Vercel Pro | hourly | change schedule to `0 * * * *` |
-| Supabase pg_cron + pg_net | hourly | see below |
+| **Azure Container Apps Job** (target) | hourly | `curl` with `CRON_SECRET` (docs/azure-runbook.md §9) |
 | Azure Functions | any | timer trigger calling `runDefaultNotificationJob()` (see azure-migration.md) |
 | Manual | — | `npm run notify:run`, or Administration → Run now |
-
-pg_cron (optional, Supabase only — the app does not depend on it):
-
-```sql
-create extension if not exists pg_cron;
-create extension if not exists pg_net;
-select cron.schedule('annual-clock-notifications', '5 * * * *', $$
-  select net.http_get(
-    url := 'https://<your-app>.vercel.app/api/cron/notifications',
-    headers := jsonb_build_object('Authorization', 'Bearer <CRON_SECRET>')
-  );
-$$);
-```
 
 ## Channels
 
