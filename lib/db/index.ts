@@ -98,6 +98,9 @@ function bind(req: sql.Request, params: unknown[]) {
   });
 }
 
+/** DEBUG_SQL=1 logs every statement's start, duration and errors (diagnostics only). */
+const TRACE = process.env.DEBUG_SQL === "1";
+
 const toParams = (text: string) => text.replace(/\$(\d+)/g, (_, n) => `@p${n}`);
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -169,9 +172,15 @@ function wrap(t: sql.Transaction): Tx {
   const run = async (text: string, params: unknown[] = []) => {
     const req = new sql.Request(t);
     bind(req, params);
+    const label = TRACE ? text.replace(/s+/g, " ").trim().slice(0, 90) : "";
+    const t0 = Date.now();
+    if (TRACE) console.error(`[sql] start  ${label}`);
     try {
-      return await req.query(toParams(text));
+      const r = await req.query(toParams(text));
+      if (TRACE) console.error(`[sql] done   ${Date.now() - t0}ms ${label}`);
+      return r;
     } catch (e) {
+      if (TRACE) console.error(`[sql] error  ${Date.now() - t0}ms ${label}: ${(e as Error).message}`);
       mapError(e);
     }
   };

@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       # Real SQL Server for the database tests (migrations, row-level security, lib/db round-trips).
       mssql:
@@ -32,6 +33,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      # Unit, notification engine, calendar sync, and SQL Server RLS tests
-      - run: npm test
+      - name: Unit tests (no database)
+        run: npx vitest run --exclude "tests/db/**"
+      - name: Check SQL Server connection
+        timeout-minutes: 3
+        run: >-
+          node -e "const sql=require('mssql');(async()=>{const p=await new sql.ConnectionPool(process.env.TEST_DATABASE_URL).connect();
+          console.log((await p.request().query('SELECT @@VERSION AS v')).recordset[0].v);await p.close()})().catch(e=>{console.error(e);process.exit(1)})"
+      - name: Database tests (SQL Server RLS, migrations, lib/db)
+        timeout-minutes: 10
+        env:
+          DEBUG_SQL: "1"
+        run: npx vitest run tests/db --reporter=verbose
       - run: npm run build

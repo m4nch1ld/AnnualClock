@@ -4,7 +4,7 @@
  * Runs when TEST_DATABASE_URL is set (always in CI). See tests/db/harness.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { hasTestDb, setupTestDb, teardownTestDb } from "./harness";
+import { hasTestDb, setupTestDb, step, teardownTestDb } from "./harness";
 
 type Db = Awaited<ReturnType<typeof setupTestDb>>;
 
@@ -46,6 +46,7 @@ describe.skipIf(!hasTestDb)("SQL Server row-level security", () => {
   beforeAll(async () => {
     db = await setupTestDb();
     S = db.S;
+    step("seeding fixtures");
     await db.withService((tx) =>
       tx.exec(`
         INSERT INTO ${S}.profiles (id, email, global_role, all_clocks_viewer, is_active) VALUES
@@ -76,6 +77,7 @@ describe.skipIf(!hasTestDb)("SQL Server row-level security", () => {
           ('${A.crewing}', '${C.crewing}', '${R.crewing}', N'STCW renewals', '2026-06-01');
         INSERT INTO ${S}.clock_secrets (clock_id, teams_webhook_url) VALUES ('${C.env}', N'https://example.test/hook');`),
     );
+    step("fixtures seeded");
   }, 120_000);
 
   afterAll(async () => {

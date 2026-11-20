@@ -13,24 +13,33 @@ export const TEST_URL = process.env.TEST_DATABASE_URL;
 export const hasTestDb = !!TEST_URL;
 
 let dbName: string | undefined;
+const t0 = Date.now();
+export const step = (msg: string) => console.error(`[harness +${((Date.now() - t0) / 1000).toFixed(1)}s] ${msg}`);
 
 export async function setupTestDb() {
   if (!TEST_URL) throw new Error("TEST_DATABASE_URL not set");
   dbName = `annual_clock_test_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  step(`connecting to master`);
   const master = await new sql.ConnectionPool(TEST_URL).connect();
+  step(`creating database ${dbName}`);
   await master.request().batch(`CREATE DATABASE [${dbName}]`);
   await master.close();
   const url = /Database=[^;]*/i.test(TEST_URL) ? TEST_URL.replace(/Database=[^;]*/i, `Database=${dbName}`) : `${TEST_URL};Database=${dbName}`;
   process.env.DATABASE_URL = url;
   delete process.env.DATABASE_SCHEMA; // default schema: annual_clock
+  step("importing migration runner");
   const { migrate } = await import("../../scripts/migrate");
-  await migrate(url, () => {});
+  step("running migrations");
+  await migrate(url, (m) => step(`migrate: ${m}`));
+  step("migrations done");
   return await import("../../lib/db");
 }
 
 export async function teardownTestDb() {
+  step("teardown: closing app pool");
   const db = await import("../../lib/db");
   await db.closePool();
+  step("teardown: dropping test database");
   if (!TEST_URL || !dbName) return;
   const master = await new sql.ConnectionPool(TEST_URL).connect();
   await master.request().batch(`ALTER DATABASE [${dbName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [${dbName}];`);
