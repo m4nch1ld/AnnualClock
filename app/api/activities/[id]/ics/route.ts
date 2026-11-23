@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSession } from "@/lib/server/session";
-import { withUser } from "@/lib/db";
+import { S, withUser } from "@/lib/db";
 import { ACTIVITY_SELECT } from "@/lib/data/clocks";
 import { buildInviteIcs } from "@/lib/calendar";
 import { buildEvent } from "@/lib/calendar/sync";
@@ -24,7 +24,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     tx.one<{ id: string; title: string; description: string | null; type: string; start_date: string; end_date: string | null; rrule: string | null; status: string; clock_id: string; clock_name: string; clock_slug: string; ring_name: string }>(
       `select x.*, c.name as clock_name, c.slug as clock_slug, r.name as ring_name
        from (${ACTIVITY_SELECT} where a.id = $1 and a.deleted_at is null) x
-       join clocks c on c.id = x.clock_id join rings r on r.id = x.ring_id`,
+       join ${S}.clocks c on c.id = x.clock_id join ${S}.rings r on r.id = x.ring_id`,
       [id],
     ),
   );

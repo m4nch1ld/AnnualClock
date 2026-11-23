@@ -8,6 +8,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      # Real SQL Server for the database tests (migrations, row-level security, lib/db round-trips).
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "CiOnly_Str0ng!Passw0rd"
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'CiOnly_Str0ng!Passw0rd' -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s --health-timeout 5s --health-retries 20 --health-start-period 30s
+    env:
+      TEST_DATABASE_URL: "Server=localhost,1433;Database=master;User Id=sa;Password=CiOnly_Str0ng!Passw0rd;Encrypt=true;TrustServerCertificate=true"
+      NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,8 +33,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      # Unit, notification-engine, calendar-sync and RLS tests (RLS runs on in-process PGlite; no database needed)
-      - run: npm test
-      - run: npm run build
+      - name: Unit tests (no database)
+        run: npx vitest run --exclude "tests/db/**"
+      - name: Check SQL Server connection
+        timeout-minutes: 3
+        run: >-
+          node -e "const sql=require('mssql');(async()=>{const p=await new sql.ConnectionPool(process.env.TEST_DATABASE_URL).connect();
+          console.log((await p.request().query('SELECT @@VERSION AS v')).recordset[0].v);await p.close()})().catch(e=>{console.error(e);process.exit(1)})"
+      - name: Database tests (SQL Server RLS, migrations, lib/db)
+        timeout-minutes: 10
         env:
-          NEXT_TELEMETRY_DISABLED: "1"
+          DEBUG_SQL: "1"
+        run: npx vitest run tests/db --reporter=verbose
+      - run: npm run build

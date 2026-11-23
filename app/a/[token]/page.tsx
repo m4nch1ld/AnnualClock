@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { verifyActionToken } from "@/lib/tokens";
-import { withService, withUser } from "@/lib/db";
+import { S, withService, withUser } from "@/lib/db";
 import { env } from "@/lib/env";
 import { addDays, todayInZone } from "@/lib/dates";
 import { formatDate, formatDateRange } from "@/lib/i18n";
@@ -41,10 +41,10 @@ export default async function ActionPage({
   const info = await withService((tx) =>
     tx.one<{ title: string; clock_name: string; clock_slug: string; end_date: string | null; start_date: string; user_active: boolean; status: string | null; snoozed_until: string | null }>(
       `select a.title, c.name as clock_name, c.slug as clock_slug, a.end_date, a.start_date,
-         (select is_active from profiles where id = $3) as user_active,
+         (select is_active from ${S}.profiles where id = $3) as user_active,
          s.status, s.snoozed_until
-       from activities a join clocks c on c.id = a.clock_id
-       left join activity_occurrences_state s on s.activity_id = a.id and s.occurrence_date = $2
+       from ${S}.activities a join ${S}.clocks c on c.id = a.clock_id
+       left join ${S}.activity_occurrences_state s on s.activity_id = a.id and s.occurrence_date = $2
        where a.id = $1 and a.deleted_at is null`,
       [p.aid, p.occ, p.uid],
     ),

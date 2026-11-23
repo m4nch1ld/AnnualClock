@@ -10,8 +10,8 @@ Outlook calendar with **Add to my Outlook**; the entry stays in sync with the cl
 
 | | |
 |---|---|
-| Stack | Next.js 16 (App Router, TypeScript strict) · Tailwind 4 · Supabase (Auth + Postgres) · plain `pg` + Row Level Security · Resend · Vercel Cron |
-| Tests | Vitest (unit, notification job, RLS on in-process Postgres) · Playwright smoke tests |
+| Stack | Next.js 16 (App Router, TypeScript strict) · Tailwind 4 · **Azure SQL Database** (shared database, own schema, row-level security) via `mssql` · Supabase Auth (prototype sign-in; Entra ID on Azure) · Resend / SMTP · scheduler-agnostic notification job |
+| Tests | Vitest (unit, notification job, calendar sync; RLS on a real SQL Server 2022 in CI) · Playwright smoke tests |
 | Docs | [`AGENTS.md`](AGENTS.md) (handover / Azure build) · [`docs/azure-runbook.md`](docs/azure-runbook.md) · [`docs/authorization.md`](docs/authorization.md) · [`docs/notifications.md`](docs/notifications.md) · [`docs/calendar.md`](docs/calendar.md) · [`docs/azure-migration.md`](docs/azure-migration.md) · [`docs/backlog.md`](docs/backlog.md) |
 
 > **Building this on Azure?** Start with [`AGENTS.md`](AGENTS.md) and [`docs/azure-runbook.md`](docs/azure-runbook.md).
@@ -20,7 +20,9 @@ Outlook calendar with **Add to my Outlook**; the entry stays in sync with the cl
 
 ## 1. Run locally (≈15 minutes)
 
-**Prerequisites:** Node 20+ (tested on 24), git, a free Supabase project. Docker is *not* needed.
+**Prerequisites:** Node 20+ (tested on 24), git, a SQL Server 2022+ or Azure SQL database, and a free Supabase project (prototype sign-in only).
+Easiest SQL Server: `docker run -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='<Strong!Pass1>' -p 1433:1433 -d mcr.microsoft.com/mssql/server:2022-latest`
+(then `CREATE DATABASE annual_clock`), or an Azure SQL dev database with Entra sign-in (`az login`).
 
 ```bash
 git clone <repo> esl-annual-clock && cd esl-annual-clock
@@ -31,9 +33,9 @@ cp .env.example .env.local
 Fill in `.env.local` (every variable is explained in `.env.example`):
 
 1. **Supabase → Project settings → API**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`.
-2. **Supabase → Connect → Connection string**: `DATABASE_URL` = *Transaction pooler* (port 6543),
-   `DATABASE_MIGRATION_URL` = *Session pooler* (port 5432). URL-encode special characters in the
-   password (`!` → `%21`).
+2. **Database**: `DATABASE_URL=Server=localhost,1433;Database=annual_clock;User Id=sa;Password=...;Encrypt=true;TrustServerCertificate=true`
+   — or, for Azure SQL with Entra sign-in, `DATABASE_HOST` + `DATABASE_NAME` (no password). Objects go into schema
+   `DATABASE_SCHEMA` (default `annual_clock`).
 3. Generate secrets: `APP_TOKEN_SECRET` and `CRON_SECRET`
    (`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`).
 4. Optional: `RESEND_API_KEY` (without it, emails are printed to the console). With Resend's test
@@ -43,7 +45,7 @@ Fill in `.env.local` (every variable is explained in `.env.example`):
    `you+envdirector@company.com`, etc.).
 
 ```bash
-npm run db:migrate   # applies supabase/migrations/*.sql (tracked in schema_migrations)
+npm run db:migrate   # applies database/migrations/*.sql (T-SQL; tracked in annual_clock.schema_migrations)
 npm run seed         # 8 clocks × 3 rings, 6 demo users, 25 activities (resets rows marked is_demo)
 npm run dev          # http://localhost:3000
 ```
@@ -78,18 +80,23 @@ user to receive a magic link.
 | Script | What it does |
 |---|---|
 | `npm run dev` / `build` / `start` | Next.js |
-| `npm run db:migrate` | Apply SQL migrations (portable runner; any PostgreSQL) |
+| `npm run db:migrate` | Apply T-SQL migrations (splits `GO` batches, substitutes the schema) |
 | `npm run seed` | Reset and recreate demo data |
 | `npm run notify:dry-run` | Print what the notification job would send now (no sends, no claims). `-- --now=<ISO>` simulates another moment |
 | `npm run notify:run` | Run the notification job once |
-| `npm test` | Vitest: unit, notification engine, RLS (in-process PGlite, no Docker) |
+| `npm test` | Vitest: unit, notification engine, calendar sync; SQL Server RLS suite when `TEST_DATABASE_URL` is set (always in CI) |
 | `npm run test:e2e` | Playwright smoke tests (needs seeded data, `DEMO_LOGIN_ENABLED=true`; first time: `npx playwright install chromium`) |
 | `npm run typecheck` | TypeScript |
 
-## 3. Deploy to Vercel + Supabase (≈15 minutes)
+## 3. Deploy
 
-1. **Supabase**: create a project (EU region). Run `npm run db:migrate` (and optionally `npm run seed`)
-   from your machine with the production `DATABASE_MIGRATION_URL`.
+**Production target: ESL's Azure via the Software Factory** — follow [`AGENTS.md`](AGENTS.md) and
+[`docs/azure-runbook.md`](docs/azure-runbook.md). The steps below describe the original prototype hosting
+(Vercel + Supabase Auth) and still work for a quick demo, now with an Azure SQL database.
+
+1. **Database**: an Azure SQL database reachable from Vercel (allow Azure/Vercel egress in its firewall, SQL auth
+   connection string in `DATABASE_URL`). Run `npm run db:migrate` (and optionally `npm run seed`) from your machine.
+   **Supabase**: create a project (EU region) for sign-in only.
 2. **Supabase → Authentication → URL configuration**: Site URL = `https://<your-app>.vercel.app`,
    add `https://<your-app>.vercel.app/**` to Redirect URLs. (Sign-in links are generated server-side
    and emailed by the app, so Supabase's own email templates are not used.)
@@ -124,21 +131,21 @@ app/                    Next.js routes: pages, server actions, API routes
   api/clocks/[slug]/export  CSV export
 components/clock/       SVG wheel, list view, month view, activity panel
 lib/                    framework-independent logic (portable to Azure Functions)
-  notifications/        planner (pure) · job runner · pg repository · channels · templates
+  notifications/        planner (pure) · job runner · SQL repository · channels · templates
   providers/            AuthProvider / EmailProvider + Supabase / Resend implementations
-  db/                   pg pool: withUser() (RLS as the user) / withService()
+  db/                   mssql pool: withUser() (RLS via SESSION_CONTEXT) / withService()
   recurrence.ts dates.ts domain.ts wheel/ ics.ts import-export.ts tokens.ts validation.ts i18n/
-supabase/migrations/    plain SQL: schema, RLS, audit trigger
+database/migrations/    T-SQL: schema, row-level security policy, audit triggers
 scripts/                migrate, seed, notify
 tests/ e2e/             Vitest and Playwright
 ```
 
 **Key decisions**
 
-- **Data access is plain `pg`.** User requests run inside `withUser(userId)`, which switches the
-  transaction to the `authenticated` role and sets the user id, so **Postgres RLS enforces every
-  rule** — the same mechanism the RLS tests exercise. Supabase is used only for Auth. On Azure the
-  same code runs against Azure Database for PostgreSQL.
+- **Azure SQL with row-level security.** User requests run inside `withUser(userId)`, which puts the
+  user's id, flags and clock roles into `SESSION_CONTEXT`; the database's security policy enforces
+  every rule — the mechanism the RLS tests exercise on SQL Server. All objects live in the
+  app's own schema, so the factory's **shared** database can host it. Supabase is only the prototype's sign-in.
 - **General management** = `profiles.all_clocks_viewer` flag (read access to all clocks, automatically
   including new ones). See `docs/authorization.md`.
 - **Dates** for all-day items are `date` columns handled as ISO strings; send times are computed in

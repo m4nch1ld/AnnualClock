@@ -34,12 +34,13 @@ admins and General management.
 | Auth | Supabase magic link (prototype). **Must be replaced by Entra ID on Azure** (runbook §7) |
 | Hosting/scheduler | Vercel + Vercel Cron (prototype). **Azure: Container Apps + Container Apps Job** (runbook §5, §9) |
 | Email | Resend (prototype). **Azure: Communication Services via SMTP** (`EMAIL_PROVIDER=smtp`, runbook §6) — already implemented |
-| Database | Plain PostgreSQL 16+. **Azure Database for PostgreSQL Flexible Server** + `supabase/bootstrap/plain-postgres.sql` — already supported and tested |
+| Database | **Azure SQL Database** (Software Factory policy: Azure SQL first), app schema `annual_clock` in the factory's **shared** database; Entra workload-identity sign-in. T-SQL migrations in `database/migrations`; RLS tested on SQL Server 2022 in CI — already implemented |
 
 ## 3. Non-negotiable rules (keep these when you change code)
 
-1. **Authorization lives in Postgres RLS.** User-facing queries run in `withUser(profileId, tx => …)`
-   (`lib/db/index.ts`), which does `set local role authenticated` + sets the user id. Never query user
+1. **Authorization lives in Azure SQL Row-Level Security.** User-facing queries run in `withUser(profileId, tx => …)`
+   (`lib/db/index.ts`), which puts the user's id, flags and clock roles into `SESSION_CONTEXT`; the security
+   policy's predicates allow or deny every row (`docs/authorization.md`). Never query user
    data with `withService()` unless the code has explicitly authorised the action first (super-admin
    checks, token endpoints, scheduler). Rules: `docs/authorization.md`; tests: `tests/db/rls.test.ts`.
 2. **Business logic stays in `/lib` as plain TypeScript** (no Next.js/Vercel/Supabase imports in
@@ -50,13 +51,15 @@ admins and General management.
    `CalendarProvider` + `InviteMailer` (`lib/calendar`). Swap implementations; don't spread vendor code.
 4. **Validate all server input with Zod** (`lib/validation.ts`). Server actions are the mutation API.
 5. **Dates**: all-day dates are `date` columns handled as `'YYYY-MM-DD'` strings with UTC arithmetic
-   (`lib/dates.ts`). pg returns DATE as string and TIMESTAMPTZ as ISO string (type parsers in
-   `lib/db`). Send times are computed in `Europe/Helsinki` with `@date-fns/tz` (DST-safe).
+   (`lib/dates.ts`). `lib/db` normalises results: `date` → `'YYYY-MM-DD'`, `datetimeoffset` → ISO string,
+   `time` → `'HH:MM'`, `uniqueidentifier` → lowercase, JSON columns (`JSON_COLUMNS`) → parsed. Send times are computed in `Europe/Helsinki` with `@date-fns/tz` (DST-safe).
 6. **Notification idempotency**: every delivery is claimed in `notification_log` (unique on
    occurrence + reminder key + recipient + channel) *before* sending. Never send outside the job's
    claim → send → mark flow.
-7. **Schema changes = new SQL file** in `supabase/migrations/` (timestamp prefix, never edit applied
-   ones), standard PostgreSQL only, RLS enabled on every new table, and add RLS tests.
+7. **Schema changes = new T-SQL file** in `database/migrations/` (number prefix, never edit applied ones),
+   objects in `[$(SCHEMA)]`, batches separated by `GO`. Every new table gets filter + block predicates in the
+   security policy (`ALTER SECURITY POLICY … ADD …`) and RLS tests. No `OUTPUT` without `INTO` on tables with
+   triggers; generate ids in the app (`randomUUID()`), use `tx.exec()` row counts.
 8. **Secrets** only via env vars (Key Vault on Azure); only `NEXT_PUBLIC_*` reaches the browser.
 9. Strings in `lib/i18n/en.ts` (Finnish to be added as `fi.ts`).
 
@@ -77,17 +80,16 @@ app/                       Next.js 16 App Router
   api/clocks/[slug]/export CSV export
 components/clock/          wheel.tsx (SVG), list-view, agenda-view, activity-panel, workspace
 lib/
-  db/                      pg pool, withUser / withService
+  db/                      mssql pool, withUser / withService (SESSION_CONTEXT), result normalisation
   data/clocks.ts           read queries
-  notifications/           planner.ts (pure) · job.ts · pg-repository.ts · channels.ts · messages.ts · templates.ts
-  calendar/                "Add to my Outlook": sync.ts · ics-invite.ts · mailers.ts · graph.ts · pg-repository.ts
+  notifications/           planner.ts (pure) · job.ts · sql-repository.ts · channels.ts · messages.ts · templates.ts
+  calendar/                "Add to my Outlook": sync.ts · ics-invite.ts · mailers.ts · graph.ts · sql-repository.ts
   providers/               auth.ts (interfaces), email.ts (Resend/SMTP/console), supabase/ (to be removed on Azure)
   server/                  session, auth selection, rate limit, workspace loader, calendar hooks
   recurrence.ts dates.ts domain.ts validation.ts tokens.ts ics.ts import-export.ts i18n/ wheel/
-supabase/migrations/       plain SQL (schema, RLS, audit, calendar links)
-supabase/bootstrap/        plain-postgres.sql — run once on non-Supabase Postgres (Azure) before migrating
+database/migrations/       T-SQL: 0001 schema · 0002 security (RLS policy, column guards) · 0003 audit triggers
 scripts/                   migrate.ts, seed.ts, notify.ts
-tests/                     Vitest: lib/*, db/rls.test.ts (PGlite, no Docker)
+tests/                     Vitest: lib/* (pure), db/rls.test.ts (real SQL Server via TEST_DATABASE_URL; CI service container)
 e2e/                       Playwright smoke tests
 docs/                      authorization, notifications, calendar, azure-runbook, azure-migration, backlog
 Dockerfile                 standalone Next.js container (untested here: no Docker on the build machine)
@@ -97,11 +99,11 @@ Dockerfile                 standalone Next.js container (untested here: no Docke
 
 ```bash
 npm ci
-cp .env.example .env.local          # fill in; see comments. Any PostgreSQL 16+ works:
-# a) local Postgres:  psql $DATABASE_MIGRATION_URL -f supabase/bootstrap/plain-postgres.sql
-# b) Supabase:        no bootstrap needed
+cp .env.example .env.local          # fill in; see comments. Needs SQL Server 2022+ or Azure SQL Database:
+#   a) SQL Server in Docker:  docker run -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=... -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest
+#   b) an Azure SQL dev database (Entra auth: DATABASE_HOST/DATABASE_NAME, `az login` locally)
 npm run db:migrate && npm run seed && npm run dev
-npm test                # 70+ tests: unit, notification job, calendar sync, RLS (in-process PGlite)
+npm test                # unit, notification job, calendar sync; + SQL Server RLS suite when TEST_DATABASE_URL is set (always in CI)
 npm run typecheck
 NEXT_DIST_DIR=.next-build npm run build   # production build without disturbing a running dev server
 npm run test:e2e        # needs seeded data + DEMO_LOGIN_ENABLED=true (Supabase auth) — adapt after Entra
@@ -114,8 +116,9 @@ implemented — that is the expected first task on Azure. Tests and `notify:dry-
 
 Follow `docs/azure-runbook.md`; summary:
 
-1. Provision: resource group, PostgreSQL Flexible Server (PG 16), Key Vault, ACR, Container Apps env, Log Analytics.
-2. Database: run `supabase/bootstrap/plain-postgres.sql`, then `npm run db:migrate`; optional `npm run seed`.
+1. Provision: resource group, Key Vault, ACR, Container Apps env, Log Analytics — and get the app's database on the
+   factory's **shared Azure SQL** (runbook §3): a schema `annual_clock` + a contained user for the app's workload identity.
+2. Database: `npm run db:migrate` with a migration identity; optional `npm run seed`.
 3. Email: Azure Communication Services Email with ESL's verified subdomain, SMTP credentials →
    `EMAIL_PROVIDER=smtp`, `SMTP_*`. (No code change needed.)
 4. **Implement Entra ID sign-in** (runbook §7.2 lists every file to touch). Add `profiles.external_id`.
@@ -130,8 +133,12 @@ Follow `docs/azure-runbook.md`; summary:
 
 | Variable | Used for | Azure source |
 |---|---|---|
-| `DATABASE_URL` | app runtime (pg pool) | Key Vault `database-url` |
-| `DATABASE_MIGRATION_URL` | `npm run db:migrate` (falls back to DATABASE_URL) | CI / operator |
+| `DATABASE_HOST` `DATABASE_NAME` | Azure SQL server + database; sign-in with the workload identity (Entra token, no password) | env (from the factory's data stack / bridge) |
+| `AZURE_CLIENT_ID` | client id of a user-assigned managed identity (omit for system-assigned) | env |
+| `DATABASE_SCHEMA` | the app's schema in the shared database (default `annual_clock`) | env |
+| `DATABASE_URL` | alternative: ADO-style connection string (local SQL Server, CI) | local only |
+| `DATABASE_MIGRATION_URL` | `npm run db:migrate` with a more privileged identity (falls back to the above) | CI / operator |
+| `TEST_DATABASE_URL` | SQL Server where tests create throwaway databases | CI |
 | `DATABASE_POOL_MAX` | pool size per replica (default 5) | env |
 | `APP_BASE_URL` | links in emails, ICS, invites | env |
 | `APP_TOKEN_SECRET` | HMAC for email action links (≥32 chars) | Key Vault |
@@ -152,7 +159,12 @@ Follow `docs/azure-runbook.md`; summary:
 ## 8. Gotchas found while building
 
 - `rrule` is CommonJS: import via the namespace interop used in `lib/recurrence.ts` / `lib/calendar/graph.ts`.
-- One transaction = one pg connection: **never `Promise.all` queries on the same `tx`**.
+- One transaction = one connection: **never `Promise.all` queries on the same `tx`**.
+- SQL Server specifics: no arrays/`jsonb` (JSON text + `openjson($1)` for lists), upsert = `UPDATE … WITH (UPDLOCK, HOLDLOCK); IF @@ROWCOUNT = 0 INSERT`,
+  `TOP (n)` instead of `LIMIT`, no `OUTPUT` on tables with triggers, block predicates raise errors (33504) where Postgres
+  silently updated 0 rows, unique indexes treat NULLs as equal (used for idempotency keys), FKs don't cascade (multiple
+  cascade paths are rejected) — the app soft-deletes.
+- The session context must be set by `withUser`/`withService` at the start of **every** transaction (pooled connections keep it).
 - Files with `"use server"` export only async server actions — helpers that take a `tx` live in
   `lib/server/*` (otherwise they become publicly callable endpoints).
 - SVG coordinates are rounded (`polar()` in `lib/wheel/geometry.ts`) to avoid hydration mismatches.

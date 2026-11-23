@@ -2,7 +2,7 @@ import "server-only";
 import { cache } from "react";
 import { redirect } from "next/navigation";
 import { auth } from "./auth";
-import { withService, withUser } from "@/lib/db";
+import { S, withService, withUser } from "@/lib/db";
 import type { ClockRole } from "@/lib/domain";
 
 export interface Profile {
@@ -39,7 +39,7 @@ export const getSession = cache(async (): Promise<Session | null> => {
   const profile = await withService((tx) =>
     tx.one<Profile>(
       `select id, email, full_name, locale, timezone, global_role, all_clocks_viewer, is_active, weekly_digest
-       from profiles where id = $1`,
+       from ${S}.profiles where id = $1`,
       [user.id],
     ),
   );
@@ -47,7 +47,7 @@ export const getSession = cache(async (): Promise<Session | null> => {
   const memberships = await withUser(user.id, (tx) =>
     tx.query<Membership>(
       `select m.clock_id, c.slug, c.name, c.color, m.role
-       from clock_members m join clocks c on c.id = m.clock_id
+       from ${S}.clock_members m join ${S}.clocks c on c.id = m.clock_id
        where m.user_id = $1 and c.archived_at is null order by c.position, c.name`,
       [user.id],
     ),

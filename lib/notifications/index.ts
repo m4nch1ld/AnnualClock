@@ -7,14 +7,14 @@
 import { getEmailProvider } from "../providers/email";
 import { createChannels } from "./channels";
 import { runNotificationJob, type JobOptions } from "./job";
-import { createPgNotificationRepository } from "./pg-repository";
+import { createSqlNotificationRepository } from "./sql-repository";
 
 export * from "./types";
 export { runNotificationJob } from "./job";
 export { planNotifications, zonedInstant } from "./planner";
 
 export function defaultJobDeps() {
-  const repo = createPgNotificationRepository();
+  const repo = createSqlNotificationRepository();
   const secret = process.env.APP_TOKEN_SECRET;
   if (!secret || secret.length < 32) throw new Error("APP_TOKEN_SECRET must be set (>= 32 chars)");
   return {

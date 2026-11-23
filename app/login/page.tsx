@@ -4,7 +4,7 @@ import { LoginForm } from "./login-form";
 import { demoLoginAction } from "./actions";
 import { getSession } from "@/lib/server/session";
 import { safeNext } from "@/lib/server/safe-redirect";
-import { withService } from "@/lib/db";
+import { S, withService } from "@/lib/db";
 import { env } from "@/lib/env";
 import { t } from "@/lib/i18n";
 import { Card } from "@/components/ui/card";
@@ -18,7 +18,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   const demoUsers = env().DEMO_LOGIN_ENABLED
     ? await withService((tx) =>
         tx.query<{ email: string; full_name: string }>(
-          `select email, full_name from profiles where is_demo and is_active order by created_at`,
+          `select email, full_name from ${S}.profiles where is_demo = 1 and is_active = 1 order by created_at`,
         ),
       )
     : [];

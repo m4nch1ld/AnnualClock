@@ -4,8 +4,13 @@ Audience: an engineer or AI coding agent with **only this repository** and acces
 Azure subscription / Entra tenant. Follow the steps in order; each ends with a check.
 Read [`AGENTS.md`](../AGENTS.md) first for the codebase rules.
 
-> **Status of these instructions:** the application code, migrations, bootstrap SQL and
-> tests are verified (CI: `npm test`, `npm run build`). The `az` commands and Dockerfile were
+> **In ESL this app is built and run by the Software Factory** (EDP landing zone + Shipyard): the
+> factory's catalog, vending and Pulumi stacks create the resources below, including the app's
+> database on the **shared Azure SQL** server. Use this runbook as the technical specification of
+> what the app needs, and the `az` commands as a reference or for a standalone environment.
+>
+> **Status of these instructions:** the application code, T-SQL migrations and tests are verified
+> (CI runs the database tests on SQL Server 2022: `npm test`, `npm run build`). The `az` commands and Dockerfile were
 > written for this runbook but **have not been executed** against ESL's subscription —
 > verify flags against current `az` CLI docs (`az <cmd> --help`) as you go.
 
@@ -26,7 +31,7 @@ Read [`AGENTS.md`](../AGENTS.md) first for the codebase rules.
 ```
 Users (M365 / Entra ID) ──HTTPS──► Azure Container Apps: ca-annualclock (Next.js standalone, Dockerfile)
                                       │  managed identity → Key Vault secrets
-                                      ├──► Azure Database for PostgreSQL Flexible Server (PG 16)
+                                      ├──► Azure SQL Database — shared database, schema annual_clock (Entra token, no password)
                                       ├──► Azure Communication Services Email (SMTP)  → reminder/digest/invite emails
                                       ├──► Microsoft Graph (later: calendar events)
                                       └──► Teams Workflows webhooks (per clock, configured in the app)
@@ -35,7 +40,7 @@ Log Analytics ◄── container logs (structured JSON from the notification jo
 ```
 
 Resources: resource group, Log Analytics workspace, Container Apps environment, container app,
-container apps job, Azure Container Registry, Key Vault, PostgreSQL Flexible Server,
+container apps job, Azure Container Registry, Key Vault, Azure SQL (shared logical server + database),
 Communication Services + Email Communication Service (+ domain), Entra app registration(s).
 
 ## 2. Variables
@@ -47,48 +52,66 @@ RG=rg-annualclock-$ENV
 NAME=annualclock$ENV            # lowercase, used for globally unique names
 ACR=acr$NAME
 KV=kv-$NAME
-PG=psql-$NAME
+SQLSRV=sql-annualclock-$ENV      # in the factory: the pool's shared logical server
+SQLDB=sqldb-shared-$ENV          # in the factory: the shared database
 CAE=cae-$NAME
 APP=ca-$NAME
 APP_URL=https://annualclock.eslshipping.com   # or the default *.azurecontainerapps.io URL first
-PG_ADMIN=clockadmin
-PG_PASS='<generate a strong password>'
 az group create -n $RG -l $LOC
 ```
 
-## 3. PostgreSQL
+## 3. Azure SQL Database (shared)
+
+The app needs, per environment:
+- a **schema** `annual_clock` in the shared database (all its objects live there; `DATABASE_SCHEMA`),
+- a **contained database user for the app's workload identity** (Container App managed identity) with
+  `SELECT, INSERT, UPDATE, DELETE, EXECUTE ON SCHEMA::annual_clock` — and nothing more (no `db_owner`,
+  no `ALTER` on the schema, no `ALTER ANY SECURITY POLICY`: it could switch the access rules off),
+- a **migration identity** (CI or operator) that may create objects in the schema and has
+  `ALTER ANY SECURITY POLICY` (needed by `0002_security.sql`). In a shared database this permission is
+  database-wide: let the platform team decide who holds it.
+
+With the factory, these come from the catalog entry (`database: { engine: azureSql, mode: shared }`) and vending;
+the container receives `DATABASE_HOST`, `DATABASE_NAME` (and `DATABASE_SCHEMA`) as env vars.
+**Confirm the exact variable names and permissions against the factory's current `application.yaml` /
+bridge contract** and map them in the app stack if they differ. Standalone equivalent:
 
 ```bash
-az postgres flexible-server create -g $RG -n $PG -l $LOC \
-  --tier Burstable --sku-name Standard_B1ms --version 16 --storage-size 32 \
-  --admin-user $PG_ADMIN --admin-password "$PG_PASS" --public-access 0.0.0.0   # 0.0.0.0 = allow Azure services
-az postgres flexible-server db create -g $RG -s $PG -d annualclock
-# temporarily allow your IP for migrations:
-az postgres flexible-server firewall-rule create -g $RG -n $PG -r me --start-ip-address <your-ip> --end-ip-address <your-ip>
+# Entra-only logical server (admin = an Entra group you are in) and a serverless database
+az sql server create -g $RG -n $SQLSRV -l $LOC --enable-ad-only-auth   --external-admin-principal-type Group --external-admin-name "<sql admins group>" --external-admin-sid <group object id>
+az sql db create -g $RG -s $SQLSRV -n $SQLDB --edition GeneralPurpose --compute-model Serverless   --family Gen5 --capacity 1 --auto-pause-delay 60 --backup-storage-redundancy Zone
+az sql server firewall-rule create -g $RG -s $SQLSRV -n me --start-ip-address <your-ip> --end-ip-address <your-ip>  # remove afterwards
 ```
 
-Connection string (do **not** add `sslmode`; `lib/db/index.ts` enables TLS for non-localhost hosts):
-`postgresql://clockadmin:<url-encoded-password>@$PG.postgres.database.azure.com:5432/annualclock`
+As an Entra admin of the database (e.g. Azure Data Studio / `sqlcmd -G`), once per environment:
+```sql
+CREATE SCHEMA annual_clock;
+CREATE USER [ca-annualclockprod] FROM EXTERNAL PROVIDER;   -- the Container App's managed identity (by name)
+GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE ON SCHEMA::annual_clock TO [ca-annualclockprod];
+CREATE USER [annualclock-migrations] FROM EXTERNAL PROVIDER;  -- CI identity running db:migrate
+GRANT CREATE TABLE, CREATE FUNCTION, CREATE PROCEDURE, CREATE VIEW, ALTER ANY SECURITY POLICY TO [annualclock-migrations];
+GRANT ALTER, CONTROL ON SCHEMA::annual_clock TO [annualclock-migrations];
+```
 
-Bootstrap + migrate + (optional) demo data, from a machine with the repo:
+Migrate + (optional) demo data, from a machine or CI job with the repo, signed in as the migration identity:
 ```bash
-export DATABASE_MIGRATION_URL='postgresql://clockadmin:...@psql-....postgres.database.azure.com:5432/annualclock'
-psql "$DATABASE_MIGRATION_URL" -f supabase/bootstrap/plain-postgres.sql     # once: roles, auth.uid(), default grants
-npm ci && npm run db:migrate                                               # all supabase/migrations/*.sql
-DATABASE_URL=$DATABASE_MIGRATION_URL DEMO_EMAIL_BASE=someone@eslshipping.com npm run seed   # optional demo data
+npm ci
+# Entra auth via DefaultAzureCredential (az login / workload identity):
+DATABASE_HOST=$SQLSRV.database.windows.net DATABASE_NAME=$SQLDB npm run db:migrate
+DATABASE_HOST=... DATABASE_NAME=... DEMO_EMAIL_BASE=someone@eslshipping.com npm run seed   # optional demo data
 ```
 (`npm run seed` without Supabase env vars creates profiles with deterministic ids; they become
 real users when they first sign in with Entra — see §7.2 email matching.)
 
-✅ Check: `npm test` passes locally (proves migrations + RLS on plain Postgres);
-`psql ... -c "select count(*) from clocks"` works; `select * from schema_migrations` lists 5+ rows.
+✅ Check: CI is green (the RLS suite runs on SQL Server 2022); `select * from annual_clock.schema_migrations`
+lists `0001_schema.sql`, `0002_security.sql`, `0003_audit.sql`; signed in as the app identity,
+`select count(*) from annual_clock.clocks` returns **0** (no session context → RLS denies), which proves the policy is on.
 
 ## 4. Key Vault and secrets
 
 ```bash
 az keyvault create -g $RG -n $KV -l $LOC --enable-rbac-authorization true
 gen() { node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"; }
-az keyvault secret set --vault-name $KV -n database-url      --value 'postgresql://clockadmin:...@...:5432/annualclock'
 az keyvault secret set --vault-name $KV -n app-token-secret  --value "$(gen)"
 az keyvault secret set --vault-name $KV -n cron-secret       --value "$(gen)"
 az keyvault secret set --vault-name $KV -n smtp-pass         --value '<ACS SMTP secret, §6>'
@@ -114,14 +137,14 @@ PRINCIPAL=$(az containerapp show -g $RG -n $APP --query identity.principalId -o 
 az role assignment create --assignee $PRINCIPAL --role "Key Vault Secrets User" --scope $(az keyvault show -n $KV --query id -o tsv)
 KVU=https://$KV.vault.azure.net/secrets
 az containerapp secret set -g $RG -n $APP --secrets \
-  database-url=keyvaultref:$KVU/database-url,identityref:system \
   app-token-secret=keyvaultref:$KVU/app-token-secret,identityref:system \
   cron-secret=keyvaultref:$KVU/cron-secret,identityref:system \
   smtp-pass=keyvaultref:$KVU/smtp-pass,identityref:system \
   entra-client-secret=keyvaultref:$KVU/entra-client-secret,identityref:system \
   session-secret=keyvaultref:$KVU/session-secret,identityref:system
 az containerapp update -g $RG -n $APP --set-env-vars \
-  DATABASE_URL=secretref:database-url APP_TOKEN_SECRET=secretref:app-token-secret CRON_SECRET=secretref:cron-secret \
+  DATABASE_HOST=$SQLSRV.database.windows.net DATABASE_NAME=$SQLDB DATABASE_SCHEMA=annual_clock \
+  APP_TOKEN_SECRET=secretref:app-token-secret CRON_SECRET=secretref:cron-secret \
   APP_BASE_URL=$APP_URL DEFAULT_TIMEZONE=Europe/Helsinki DIGEST_SEND_TIME=08:00 \
   EMAIL_PROVIDER=smtp EMAIL_FROM='ESL Annual Clock <noreply@annualclock.eslshipping.com>' \
   SMTP_HOST=smtp.azurecomm.net SMTP_PORT=587 SMTP_USER='<§6>' SMTP_PASS=secretref:smtp-pass \
@@ -185,15 +208,19 @@ eslshipping.com mailbox. Then do the calendar invite check in `docs/calendar.md`
 6. Remove `app/auth/confirm`, the demo switcher (`DEMO_LOGIN_ENABLED`), `lib/providers/supabase/*`,
    `@supabase/*` packages and `NEXT_PUBLIC_SUPABASE_*` / `SUPABASE_SERVICE_ROLE_KEY` env vars.
    `npm run seed` already works without Supabase.
-7. Database identity hook: unchanged. `withUser(profileId)` sets `request.jwt.claim.sub`;
-   `auth.uid()` from `supabase/bootstrap/plain-postgres.sql` reads it.
+7. Database: unchanged. `withUser(profileId)` keeps putting the internal profile id, flags and
+   clock roles into `SESSION_CONTEXT`; the RLS policy reads them.
 8. Update `e2e/smoke.spec.ts` login helper (e.g. a test-only signed session cookie behind an env flag
    that is never enabled in production, or Playwright `storageState` from a real test account).
 
-### 7.3 Authorization stays in Postgres
+### 7.3 Authorization stays in the database
 Nothing in `docs/authorization.md` changes: roles live in `clock_members`, `profiles.global_role`
-and `profiles.all_clocks_viewer`; RLS enforces them. Set the first super admin by SQL:
-`update profiles set global_role = 'super_admin' where lower(email) = '<it-owner>@eslshipping.com';`
+and `profiles.all_clocks_viewer`; RLS enforces them. Set the first super admin by SQL (as a
+database admin; the column guard only allows this in service context):
+```sql
+EXEC sp_set_session_context N'app_service', 1;
+UPDATE annual_clock.profiles SET global_role = N'super_admin' WHERE lower(email) = N'<it-owner>@eslshipping.com';
+```
 
 ### 7.4 Optional: Entra group → clock role sync
 Mapping proposal in `docs/authorization.md` (`Clock-<Department>-Viewers/Editors/Admins`,
@@ -236,6 +263,6 @@ the HTTP job above needs no extra code.
 - [ ] Demo data removed (`delete from clocks where is_demo; delete from profiles where is_demo;`) or kept intentionally.
 - [ ] Real clocks/rings/members created (Administration → Clocks) and first super admin set.
 - [ ] Teams webhooks configured per clock and tested.
-- [ ] Postgres: firewall rule for your IP removed; automated backups (default 7 days) confirmed; consider zone-redundant HA for prod.
+- [ ] Azure SQL: temporary firewall rules removed; app identity has only schema-level DML/EXECUTE (no db_owner, no ALTER ANY SECURITY POLICY); point-in-time restore retention confirmed; auditing to Log Analytics on.
 - [ ] Alert: Log Analytics query for no `"msg":"run finished"` in 3 h → email IT.
 - [ ] Acceptance criteria in `AGENTS.md` §9 re-verified on Azure.

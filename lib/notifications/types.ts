@@ -119,7 +119,7 @@ export interface RetryableEntry {
   intent: NotificationIntent;
 }
 
-/** Persistence used by the job. Implemented with plain SQL in pg-repository.ts. */
+/** Persistence used by the job. Implemented with T-SQL in sql-repository.ts. */
 export interface NotificationRepository {
   /** Start a run; returns its id and the end of the last successful window (if any). */
   startRun(job: string, dryRun: boolean): Promise<{ runId: string; lastWindowEnd: Date | null }>;
