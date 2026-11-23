@@ -259,7 +259,13 @@ describe.skipIf(!hasTestDb)("SQL Server row-level security", () => {
       );
       expect(await count(U.envDirector, `SELECT count(*) AS n FROM ${S}.calendar_links`)).toBe(1);
       await expect(
-        asUser(U.viewer, (tx) => tx.exec(`INSERT INTO ${S}.calendar_links (user_id, activity_id, scope, uid) VALUES ($1, $2, N'series', N'x')`, [U.viewer, A.env])),
+        // a link the viewer does not have yet (one occurrence), so the RLS block — not a duplicate key — is what rejects it
+        asUser(U.viewer, (tx) =>
+          tx.exec(
+            `INSERT INTO ${S}.calendar_links (user_id, activity_id, scope, occurrence_date, uid) VALUES ($1, $2, N'occurrence', '2026-03-31', N'x')`,
+            [U.viewer, A.env],
+          ),
+        ),
       ).rejects.toThrow(DENIED);
     });
 
