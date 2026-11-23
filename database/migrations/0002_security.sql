@@ -178,9 +178,9 @@ CREATE SECURITY POLICY [$(SCHEMA)].rls_policy
   ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].calendar_links BEFORE DELETE,
 
   ADD FILTER PREDICATE [$(SCHEMA)].rls_audit_read(clock_id) ON [$(SCHEMA)].audit_log,
-  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].audit_log AFTER INSERT,
-  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].audit_log BEFORE UPDATE,
-  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].audit_log BEFORE DELETE,
+  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(clock_id) ON [$(SCHEMA)].audit_log AFTER INSERT,
+  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(clock_id) ON [$(SCHEMA)].audit_log BEFORE UPDATE,
+  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(clock_id) ON [$(SCHEMA)].audit_log BEFORE DELETE,
 
   ADD FILTER PREDICATE [$(SCHEMA)].rls_super(id) ON [$(SCHEMA)].job_runs,
   ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].job_runs AFTER INSERT,
