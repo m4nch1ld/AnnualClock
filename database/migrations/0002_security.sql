@@ -23,18 +23,22 @@ SELECT
                        N'$."' + LOWER(CONVERT(nvarchar(36), @clock_id)) + N'"') END AS role;
 GO
 
--- generic helpers (sql_variant so they fit any key column)
-CREATE FUNCTION [$(SCHEMA)].rls_service(@x sql_variant)
+-- generic helpers (argument = the row's key column; only used to bind the predicate to the table)
+CREATE FUNCTION [$(SCHEMA)].rls_service(@x uniqueidentifier)
 RETURNS TABLE WITH SCHEMABINDING AS RETURN
 SELECT 1 AS ok FROM [$(SCHEMA)].rls_ctx(NULL) c WHERE c.svc = 1;
 GO
-CREATE FUNCTION [$(SCHEMA)].rls_super(@x sql_variant)
+CREATE FUNCTION [$(SCHEMA)].rls_super(@x uniqueidentifier)
 RETURNS TABLE WITH SCHEMABINDING AS RETURN
 SELECT 1 AS ok FROM [$(SCHEMA)].rls_ctx(NULL) c WHERE c.svc = 1 OR c.super_admin = 1;
 GO
-CREATE FUNCTION [$(SCHEMA)].rls_signed_in(@x sql_variant)
+CREATE FUNCTION [$(SCHEMA)].rls_signed_in(@x uniqueidentifier)
 RETURNS TABLE WITH SCHEMABINDING AS RETURN
 SELECT 1 AS ok FROM [$(SCHEMA)].rls_ctx(NULL) c WHERE c.svc = 1 OR c.uid IS NOT NULL;
+GO
+CREATE FUNCTION [$(SCHEMA)].rls_service_key(@k nvarchar(200))
+RETURNS TABLE WITH SCHEMABINDING AS RETURN
+SELECT 1 AS ok FROM [$(SCHEMA)].rls_ctx(NULL) c WHERE c.svc = 1;
 GO
 CREATE FUNCTION [$(SCHEMA)].rls_self(@user_id uniqueidentifier)
 RETURNS TABLE WITH SCHEMABINDING AS RETURN
@@ -183,8 +187,8 @@ CREATE SECURITY POLICY [$(SCHEMA)].rls_policy
   ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].job_runs BEFORE UPDATE,
   ADD BLOCK PREDICATE [$(SCHEMA)].rls_service(id) ON [$(SCHEMA)].job_runs BEFORE DELETE,
 
-  ADD FILTER PREDICATE [$(SCHEMA)].rls_service([key]) ON [$(SCHEMA)].rate_limits,
-  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service([key]) ON [$(SCHEMA)].rate_limits AFTER INSERT
+  ADD FILTER PREDICATE [$(SCHEMA)].rls_service_key([key]) ON [$(SCHEMA)].rate_limits,
+  ADD BLOCK PREDICATE [$(SCHEMA)].rls_service_key([key]) ON [$(SCHEMA)].rate_limits AFTER INSERT
 WITH (STATE = ON, SCHEMABINDING = ON);
 GO
 

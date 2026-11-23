@@ -12,12 +12,21 @@ import { join } from "node:path";
 import sql from "mssql";
 import { SCHEMA, connectionConfig } from "../lib/db";
 
-export function splitBatches(text: string): string[] {
+/** True when every non-empty line is a `--` comment (such batches are skipped). */
+const isCommentOnly = (batch: string) =>
+  batch.split("\n").every((line) => line.trim() === "" || line.trim().startsWith("--"));
+
+/**
+ * Split a migration file into batches on `GO` lines and substitute $(SCHEMA).
+ * Line-based on purpose: an earlier regex backtracked exponentially on comment lines
+ * full of dashes ("-- -----") and froze the runner.
+ */
+export function splitBatches(text: string, schema: string = SCHEMA): string[] {
   return text
-    .replace(/\$\(SCHEMA\)/g, SCHEMA)
-    .split(/^\s*GO\s*;?\s*$/im)
+    .replace(/\$\(SCHEMA\)/g, schema)
+    .split(/^[ \t]*GO[ \t]*;?[ \t]*$/im)
     .map((b) => b.trim())
-    .filter((b) => b && !/^(--[^\n]*\n?\s*)+$/.test(b + "\n"));
+    .filter((b) => b && !isCommentOnly(b));
 }
 
 export async function migrate(config: string | sql.config = process.env.DATABASE_MIGRATION_URL || connectionConfig(), log = console.log) {

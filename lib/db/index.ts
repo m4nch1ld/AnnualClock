@@ -150,15 +150,25 @@ function normalise(rows: Row[], columns: Record<string, ColumnMeta> | undefined)
   return rows;
 }
 
-/** Map SQL Server error numbers to the Postgres-style codes the app checks. */
-function mapError(e: unknown): never {
-  const err = e as { number?: number; message?: string; code?: string; originalError?: { info?: { number?: number } } };
-  const num = err.number ?? err.originalError?.info?.number;
-  const msg = err.message ?? String(e);
+type SqlErr = { number?: number; message?: string; originalError?: { info?: { number?: number } }; precedingErrors?: SqlErr[] };
+
+/**
+ * Map SQL Server error numbers to the Postgres-style codes the app checks.
+ * SQL Server often sends the real error followed by a generic one (3621 "The statement has been
+ * terminated", 3616 "An error was raised during trigger execution…"); the driver reports the last
+ * one and keeps the rest in `precedingErrors`, so every error in the chain is inspected.
+ */
+export function mapError(e: unknown): never {
+  const top = e as SqlErr;
+  const chain = [...(top.precedingErrors ?? []), top];
+  const numbers = chain.map((x) => x.number ?? x.originalError?.info?.number);
+  const msg = chain.map((x) => x.message).filter(Boolean).join(" | ") || String(e);
+  const has = (...n: number[]) => numbers.find((x) => x !== undefined && n.includes(x));
   let code: string | undefined;
-  if (num === 2627 || num === 2601) code = "23505";
-  else if (num === 547) code = /FOREIGN KEY/i.test(msg) ? "23503" : "23514";
-  else if (num === 33504 || num === 50001) code = "42501";
+  let num: number | undefined;
+  if ((num = has(33504, 50001))) code = "42501";
+  else if ((num = has(2627, 2601))) code = "23505";
+  else if ((num = has(547))) code = /FOREIGN KEY/i.test(msg) ? "23503" : "23514";
   if (code) {
     const wrapped = new Error(code === "42501" ? `permission denied (row-level security): ${msg}` : msg) as Error & { code: string; number?: number };
     wrapped.code = code;
